@@ -19,23 +19,25 @@ type ErrorMsg struct {
 
 // snapshot of the current state of the app
 type Model struct {
-	filename   string
-	totalSize  int64
-	downloaded int64
-	progress   progress.Model
-	status     string
-	err        error
+	filename    string
+	totalSize   int64
+	acceptRange bool
+	downloaded  int64
+	progress    progress.Model
+	status      string
+	err         error
 }
 
-func InitialModel(filename string, total int64) Model {
+func InitialModel(filename string, total int64, acceptRange bool) Model {
 	p := progress.New(progress.WithDefaultGradient())
 	return Model{
-		filename:   filename,
-		totalSize:  total,
-		downloaded: 0,
-		progress:   p,
-		status:     "downloading",
-		err:        nil,
+		filename:    filename,
+		totalSize:   total,
+		acceptRange: acceptRange,
+		downloaded:  0,
+		progress:    p,
+		status:      "downloading",
+		err:         nil,
 	}
 }
 
@@ -83,8 +85,20 @@ func (m Model) View() string {
 		return fmt.Sprintf("Downloaded %s (%d bytes)\n", m.filename, m.downloaded)
 	}
 
+	if m.status == "downloading" {
+		if m.acceptRange {
+			return fmt.Sprintf(
+				"Downloading (Accepts Ranges) %s\n\n%s\n\n%d / %d bytes\nPress q to quit\n",
+				m.filename,
+				m.progress.View(),
+				m.downloaded,
+				m.totalSize,
+			)
+		}
+	}
+
 	return fmt.Sprintf(
-		"Downloading %s\n\n%s\n\n%d / %d bytes\nPress q to quit\n",
+		"Downloading (Only Streaming) %s\n\n%s\n\n%d / %d bytes\nPress q to quit\n",
 		m.filename,
 		m.progress.View(),
 		m.downloaded,

@@ -3,11 +3,13 @@ package downloader
 import (
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 )
 
 // callback types
@@ -15,14 +17,27 @@ type ProgressFunc func(n int64)
 type DoneFunc func()
 type ErrorFunc func(err error)
 
-func Download(reqUrl string, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
-	u, err := url.Parse(reqUrl)
-	if err != nil {
-		onError(err)
-		return
-	}
+// struct to implement io.Writer for custom use of WriteAt() instead of Write() in io.Copy()
+type OffsetWriter struct {
+	file       *os.File
+	offset     int64
+	onProgress func(int64)
+}
 
-	req, err := http.NewRequest("GET", reqUrl, nil)
+func (ow *OffsetWriter) Write(p []byte) (int, error) {
+	nwrite, err := ow.file.WriteAt(p, int64(ow.offset))
+	if err != nil {
+		return nwrite, fmt.Errorf("Could not write to file at offset %v - %v", ow.offset, err)
+	}
+	ow.offset += int64(nwrite)
+	ow.onProgress(int64(nwrite))
+	return nwrite, nil
+}
+
+const ChunkSize = 32 * 1024
+
+func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		onError(err)
 		return
@@ -42,7 +57,7 @@ func Download(reqUrl string, onProgress ProgressFunc, onDone DoneFunc, onError E
 		return
 	}
 
-	filename := getFileName(u, resp)
+	filename := GetFileName(&u, resp)
 
 	file, err := os.Create(filename)
 	if err != nil {
@@ -60,8 +75,101 @@ func Download(reqUrl string, onProgress ProgressFunc, onDone DoneFunc, onError E
 	onDone()
 }
 
-// <== Helper Functions ==>
-func getFileName(u *url.URL, resp *http.Response) string {
+type RangeDownloadInfo struct {
+	ChunkChan   chan int
+	WorkerLimit int
+	TotalChunks int64
+	ChunkSize   int64
+	TotalSize   int64
+	ReqURL      string
+	Filename    string
+	File        *os.File
+}
+
+func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string) *RangeDownloadInfo {
+	return &RangeDownloadInfo{
+		ChunkChan:   make(chan int),
+		WorkerLimit: 8,
+		TotalChunks: int64(math.Ceil(float64(totalSize) / ChunkSize)),
+		ChunkSize:   ChunkSize,
+		TotalSize:   totalSize,
+		ReqURL:      reqURl,
+		Filename:    filename,
+	}
+}
+
+func (rdi *RangeDownloadInfo) RangeDownload(onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
+	if rdi.TotalSize == 0 || rdi.Filename == "" {
+		onError(fmt.Errorf("Missing Information In the Provided Range Download Information"))
+	}
+
+	var wg sync.WaitGroup
+	rdi.TotalChunks = int64(math.Ceil(float64(rdi.TotalSize) / float64(rdi.ChunkSize)))
+
+	// pre-allocate file with TotalSize
+	file, err := os.Create(rdi.Filename)
+	if err != nil {
+		onError(err)
+	}
+	rdi.File = file
+	rdi.File.Truncate(int64(rdi.TotalSize))
+
+	// spawn go routines and wait for completion
+	wg.Add(rdi.WorkerLimit)
+	for i := 0; i < rdi.WorkerLimit; i++ {
+		go rdi.rangeDownloadWorker(&wg, onError, onProgress)
+	}
+	go func() {
+		for chunkIndex := 0; int64(chunkIndex) < rdi.TotalChunks; chunkIndex++ {
+			rdi.ChunkChan <- chunkIndex
+		}
+		close(rdi.ChunkChan)
+	}()
+	wg.Wait()
+	onDone()
+}
+
+func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, onError ErrorFunc, onProgress ProgressFunc) {
+	defer wg.Done()
+	client := &http.Client{}
+
+	for chunkIndex := range rdi.ChunkChan {
+		startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
+		endPos := math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1))
+
+		req, err := http.NewRequest("GET", rdi.ReqURL, nil)
+		if err != nil {
+			onError(err)
+			continue
+		}
+		req.Header.Add("Range", fmt.Sprintf("bytes=%v-%v", startPos, endPos))
+
+		resp, err := client.Do(req)
+		if err != nil {
+			onError(err)
+			continue
+		}
+		if resp.StatusCode == http.StatusPartialContent {
+			// write to file
+			writer := &OffsetWriter{
+				file:       rdi.File,
+				offset:     startPos,
+				onProgress: onProgress,
+			}
+			_, err := io.Copy(writer, resp.Body)
+			if err != nil {
+				onError(err)
+				continue
+			}
+			resp.Body.Close()
+		} else {
+			onError(fmt.Errorf("Bad Status Code Received - %v", resp.StatusCode))
+			continue
+		}
+	}
+}
+
+func GetFileName(u *url.URL, resp *http.Response) string {
 	contentDisposition := resp.Header.Get("Content-Disposition")
 
 	if contentDisposition != "" {
@@ -79,10 +187,11 @@ func getFileName(u *url.URL, resp *http.Response) string {
 	return pathSlice[len(pathSlice)-1]
 }
 
+// <== Helper Functions ==>
 // copy with progress callback
 func copy(src io.Reader, dst io.Writer, onProgress ProgressFunc) (int64, error) {
 	var totalWritten, chunkWritten int64
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, ChunkSize)
 
 	for {
 		nread, rerr := src.Read(buf)

@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"net/http"
-	"path/filepath"
+	"net/url"
 
 	"downpour/internal/downloader"
 	"downpour/internal/ui"
@@ -26,35 +26,62 @@ func main() {
 		return
 	}
 
-	url := flag.Arg(0)
+	urlString := flag.Arg(0)
 
-	resp, err := http.Head(url)
+	// find InitialModel values -> TotalSize & AcceptRanges
+	resp, err := http.Head(urlString)
 	if err != nil {
 		panic(err)
 	}
 	totalSize := resp.ContentLength
+
+	var acceptRangeBool bool
+	if acceptRange := resp.Header.Get("Accept-Ranges"); acceptRange == "bytes" {
+		acceptRangeBool = true
+	}
 	resp.Body.Close()
 
-	filename := filepath.Base(url)
+	parsedUrl, err := url.Parse(urlString)
+	if err != nil {
+		panic(err)
+	}
+	filename := downloader.GetFileName(parsedUrl, resp)
 
-	m := ui.InitialModel(filename, totalSize)
+	m := ui.InitialModel(filename, totalSize, acceptRangeBool)
 	p := tea.NewProgram(m)
 
-	go downloader.Download(
-		url,
+	if acceptRangeBool {
+		rdi := downloader.InitRangeDownloadInfo(filename, totalSize, urlString)
+		go rdi.RangeDownload(
+			func(n int64) {
+				p.Send(ui.ProgressMsg{Bytes: int(n)})
+			},
 
-		func(n int64) {
-			p.Send(ui.ProgressMsg{Bytes: int(n)})
-		},
+			func() {
+				p.Send(ui.DoneMsg{})
+			},
 
-		func() {
-			p.Send(ui.DoneMsg{})
-		},
+			func(err error) {
+				p.Send(ui.ErrorMsg{Err: err})
+			},
+		)
+	} else {
+		go downloader.StreamDownload(
+			*parsedUrl,
 
-		func(err error) {
-			p.Send(ui.ErrorMsg{Err: err})
-		},
-	)
+			func(n int64) {
+				p.Send(ui.ProgressMsg{Bytes: int(n)})
+			},
+
+			func() {
+				p.Send(ui.DoneMsg{})
+			},
+
+			func(err error) {
+				p.Send(ui.ErrorMsg{Err: err})
+			},
+		)
+	}
 
 	if _, err := p.Run(); err != nil {
 		panic(err)
