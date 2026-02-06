@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"downpour/internal/downloader"
 	"fmt"
 	"time"
 
@@ -18,11 +19,14 @@ type ErrorMsg struct {
 	Err error
 }
 
+type TickMsg struct{}
+
 // snapshot of the current state of the app
 type Model struct {
 	filename    string
 	totalSize   int64
 	acceptRange bool
+	rdi         *downloader.RangeDownloadInfo
 	downloaded  int64
 	progress    progress.Model
 	status      string
@@ -31,12 +35,13 @@ type Model struct {
 	elapsed     time.Duration
 }
 
-func InitialModel(filename string, total int64, acceptRange bool) Model {
+func InitialModel(filename string, total int64, acceptRange bool, rdi *downloader.RangeDownloadInfo) Model {
 	p := progress.New(progress.WithDefaultGradient())
 	return Model{
 		filename:    filename,
 		totalSize:   total,
 		acceptRange: acceptRange,
+		rdi:         rdi,
 		downloaded:  0,
 		progress:    p,
 		status:      "downloading",
@@ -46,7 +51,9 @@ func InitialModel(filename string, total int64, acceptRange bool) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+		return TickMsg{}
+	})
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -64,6 +71,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+	case TickMsg:
+		nextTick := tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg { return TickMsg{} })
+		m.downloaded = m.rdi.BytesWritten.Load()
+		if m.totalSize > 0 {
+			percent := float64(m.downloaded) / float64(m.totalSize)
+			return m, tea.Batch(m.progress.SetPercent(percent), nextTick)
+		}
+		return m, nextTick
 	case DoneMsg:
 		m.status = "done"
 		m.elapsed = time.Since(m.startTime)
