@@ -17,6 +17,8 @@ type ProgressFunc func(n int64)
 type DoneFunc func()
 type ErrorFunc func(err error)
 
+const BufferSize = 64 * 1024
+
 // struct to implement io.Writer for custom use of WriteAt() instead of Write() in io.Copy()
 type OffsetWriter struct {
 	file       *os.File
@@ -33,8 +35,6 @@ func (ow *OffsetWriter) Write(p []byte) (int, error) {
 	ow.onProgress(int64(nwrite))
 	return nwrite, nil
 }
-
-const ChunkSize = 32 * 1024
 
 func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
 	req, err := http.NewRequest("GET", u.String(), nil)
@@ -87,11 +87,13 @@ type RangeDownloadInfo struct {
 }
 
 func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string) *RangeDownloadInfo {
+	workerLimit := 12
+	chunkSize := calculateChunkSize(totalSize, workerLimit)
 	return &RangeDownloadInfo{
 		ChunkChan:   make(chan int),
-		WorkerLimit: 8,
-		TotalChunks: int64(math.Ceil(float64(totalSize) / ChunkSize)),
-		ChunkSize:   ChunkSize,
+		WorkerLimit: workerLimit,
+		ChunkSize:   chunkSize,
+		TotalChunks: int64(math.Ceil(float64(totalSize) / float64(chunkSize))),
 		TotalSize:   totalSize,
 		ReqURL:      reqURl,
 		Filename:    filename,
@@ -110,9 +112,16 @@ func (rdi *RangeDownloadInfo) RangeDownload(onProgress ProgressFunc, onDone Done
 	file, err := os.Create(rdi.Filename)
 	if err != nil {
 		onError(err)
+		return
 	}
 	rdi.File = file
-	rdi.File.Truncate(int64(rdi.TotalSize))
+	defer file.Close()
+
+	err = rdi.File.Truncate(int64(rdi.TotalSize))
+	if err != nil {
+		onError(err)
+		return
+	}
 
 	// spawn go routines and wait for completion
 	wg.Add(rdi.WorkerLimit)
@@ -135,7 +144,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, onError Er
 
 	for chunkIndex := range rdi.ChunkChan {
 		startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
-		endPos := math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1))
+		endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
 
 		req, err := http.NewRequest("GET", rdi.ReqURL, nil)
 		if err != nil {
@@ -191,7 +200,7 @@ func GetFileName(u *url.URL, resp *http.Response) string {
 // copy with progress callback
 func copy(src io.Reader, dst io.Writer, onProgress ProgressFunc) (int64, error) {
 	var totalWritten, chunkWritten int64
-	buf := make([]byte, ChunkSize)
+	buf := make([]byte, BufferSize)
 
 	for {
 		nread, rerr := src.Read(buf)
@@ -215,4 +224,24 @@ func copy(src io.Reader, dst io.Writer, onProgress ProgressFunc) (int64, error) 
 			return totalWritten, rerr
 		}
 	}
+}
+
+func calculateChunkSize(totalSize int64, workerLimit int) int64 {
+	const minChunkSize = 1 * 1024 * 1024  // 1MB
+	const maxChunkSize = 64 * 1024 * 1024 // 32MB
+	const targetChunksPerWorker = 4
+
+	if totalSize <= 0 {
+		return maxChunkSize
+	}
+
+	chunkSize := totalSize / (int64(workerLimit) * targetChunksPerWorker)
+
+	if chunkSize < minChunkSize {
+		return minChunkSize
+	}
+	if chunkSize > maxChunkSize {
+		return maxChunkSize
+	}
+	return chunkSize
 }
