@@ -47,16 +47,12 @@ func main() {
 	}
 	filename := downloader.GetFileName(parsedUrl, resp)
 
-	m := ui.InitialModel(filename, totalSize, acceptRangeBool)
+	rdi := downloader.InitRangeDownloadInfo(filename, totalSize, urlString)
+	m := ui.InitialModel(filename, totalSize, acceptRangeBool, rdi)
 	p := tea.NewProgram(m)
 
 	if acceptRangeBool {
-		rdi := downloader.InitRangeDownloadInfo(filename, totalSize, urlString)
 		go rdi.RangeDownload(
-			func(n int64) {
-				p.Send(ui.ProgressMsg{Bytes: int(n)})
-			},
-
 			func() {
 				p.Send(ui.DoneMsg{})
 			},
