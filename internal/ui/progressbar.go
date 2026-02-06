@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,6 +27,8 @@ type Model struct {
 	progress    progress.Model
 	status      string
 	err         error
+	startTime   time.Time
+	elapsed     time.Duration
 }
 
 func InitialModel(filename string, total int64, acceptRange bool) Model {
@@ -38,6 +41,7 @@ func InitialModel(filename string, total int64, acceptRange bool) Model {
 		progress:    p,
 		status:      "downloading",
 		err:         nil,
+		startTime:   time.Now(),
 	}
 }
 
@@ -62,9 +66,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case DoneMsg:
 		m.status = "done"
+		m.elapsed = time.Since(m.startTime)
 		return m, tea.Quit
 	case ErrorMsg:
 		m.err = msg.Err
+		m.status = "error"
 		return m, tea.Quit
 	}
 
@@ -82,7 +88,7 @@ func (m Model) View() string {
 	}
 
 	if m.status == "done" {
-		return fmt.Sprintf("Downloaded %s (%d bytes)\n", m.filename, m.downloaded)
+		return fmt.Sprintf("Downloaded %s (%d bytes in %vs)\n", m.filename, m.downloaded, (m.elapsed.Seconds()))
 	}
 
 	if m.status == "downloading" {
