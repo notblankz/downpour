@@ -3,9 +3,11 @@ package downloader
 import (
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"mime"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strings"
@@ -155,6 +157,9 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onError ErrorFunc) 
 func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *http.Client, onError ErrorFunc) {
 	defer wg.Done()
 
+	logger, logFile := getTraceLogger()
+	defer logFile.Close()
+
 	for chunkIndex := range rdi.ChunkChan {
 		startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
 		endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
@@ -166,11 +171,24 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *ht
 		}
 		req.Header.Add("Range", fmt.Sprintf("bytes=%v-%v", startPos, endPos))
 
-		resp, err := client.Do(req)
-		if err != nil {
-			onError(err)
-			continue
+		trace := &httptrace.ClientTrace{
+			GotConn: func(connInfo httptrace.GotConnInfo) {
+				if connInfo.Reused {
+					logger.Printf("[Chunk %d] Connection Reused | IdleTime: %v", chunkIndex, connInfo.IdleTime)
+				} else {
+					logger.Printf("[Chunk %d] NEW Connection Dialed | Addr: %v", chunkIndex, connInfo.Conn.RemoteAddr())
+				}
+			},
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				if info.Err != nil {
+					logger.Printf("[Chunk %d] Write Error: %v", chunkIndex, info.Err)
+				}
+			},
 		}
+
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+
+		resp, err := client.Do(req)
 
 		if resp.StatusCode == http.StatusPartialContent {
 			// write to file
@@ -260,4 +278,12 @@ func calculateChunkSize(totalSize int64, workerLimit int) int64 {
 		return maxChunkSize
 	}
 	return chunkSize
+}
+
+func getTraceLogger() (*log.Logger, *os.File) {
+	f, err := os.OpenFile("httptrace.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	return log.New(f, "", log.LstdFlags|log.Lmicroseconds), f
 }
