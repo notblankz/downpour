@@ -3,6 +3,7 @@ package ui
 import (
 	"downpour/internal/downloader"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
@@ -23,17 +24,28 @@ type TickMsg struct{}
 
 // snapshot of the current state of the app
 type Model struct {
-	filename    string
-	totalSize   int64
-	acceptRange bool
-	rdi         *downloader.RangeDownloadInfo
-	downloaded  int64
-	progress    progress.Model
-	status      string
-	err         error
-	startTime   time.Time
-	elapsed     time.Duration
+	filename       string
+	totalSize      int64
+	acceptRange    bool
+	rdi            *downloader.RangeDownloadInfo
+	downloaded     int64
+	progress       progress.Model
+	status         string
+	err            error
+	startTime      time.Time
+	elapsed        time.Duration
+	lastDownloaded int64
+	currentSpeed   float64
 }
+
+const asciiLogo = `
+    ____
+   / __ \____ _      ______  ____  ____  __  _______
+  / / / / __ \ | /| / / __ \/ __ \/ __ \/ / / / ___/
+ / /_/ / /_/ / |/ |/ / / / / /_/ / /_/ / /_/ / /
+/_____/\____/|__/|__/_/ /_/ .___/\____/\__,_/_/
+                         /_/
+`
 
 func InitialModel(filename string, total int64, acceptRange bool, rdi *downloader.RangeDownloadInfo) Model {
 	p := progress.New(progress.WithDefaultGradient())
@@ -51,7 +63,7 @@ func InitialModel(filename string, total int64, acceptRange bool, rdi *downloade
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return TickMsg{}
 	})
 }
@@ -75,8 +87,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.rdi == nil || m.status == "error" {
 			return m, nil
 		}
-		nextTick := tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg { return TickMsg{} })
-		m.downloaded = m.rdi.BytesWritten.Load()
+		currentTotal := m.rdi.BytesWritten.Load()
+		delta := currentTotal - m.lastDownloaded
+		instantSpeed := float64(delta) * 2
+		m.currentSpeed = (0.7 * m.currentSpeed) + (0.3 * instantSpeed)
+		m.downloaded = currentTotal
+		m.lastDownloaded = currentTotal
+		nextTick := tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return TickMsg{} })
 		if m.totalSize > 0 {
 			percent := float64(m.downloaded) / float64(m.totalSize)
 			return m, tea.Batch(m.progress.SetPercent(percent), nextTick)
@@ -102,30 +119,70 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if m.status == "error" {
-		return fmt.Sprintf("Error: %v\n", m.err)
+		return fmt.Sprintf("\nFatal Error: %v\n\n  Press 'q' to quit", m.err)
+	}
+
+	format := func(val float64, suffix string) string {
+		v, p := ScaleValue(val)
+		return fmt.Sprintf("%.2f %s%s", v, p, suffix)
 	}
 
 	if m.status == "done" {
-		return fmt.Sprintf("Downloaded %s (%d bytes in %vs)\n", m.filename, m.downloaded, (m.elapsed.Seconds()))
+		avgSpeed := float64(m.downloaded) / m.elapsed.Seconds()
+		return fmt.Sprintf(
+			"%s\nDownload Complete!\n\n    File: %s\n    Size: %s\n    Time: %.2fs\n    Average Speed: %s\n\n  Press 'q' to exit",
+			asciiLogo,
+			m.filename,
+			format(float64(m.downloaded), "B"),
+			m.elapsed.Seconds(),
+			format(avgSpeed, "B/s"),
+		)
 	}
 
-	if m.status == "downloading" {
-		if m.acceptRange {
-			return fmt.Sprintf(
-				"Downloading (Accepts Ranges) %s\n\n%s\n\n%d / %d bytes\nPress q to quit\n",
-				m.filename,
-				m.progress.View(),
-				m.downloaded,
-				m.totalSize,
-			)
-		}
+	header := "Streaming"
+	if m.acceptRange {
+		header = "Parallel Multi-Worker"
+	}
+
+	speedStr := format(m.currentSpeed, "B/s")
+	var etdStr string
+	if m.currentSpeed > 0 && m.totalSize > 0 {
+		remaining := float64(m.totalSize - m.downloaded)
+		seconds := remaining / m.currentSpeed
+		etdStr = fmt.Sprintf("ETD: %s", (time.Duration(seconds) * time.Second).Round(time.Second))
+	} else {
+		etdStr = "ETD: Calculating..."
 	}
 
 	return fmt.Sprintf(
-		"Downloading (Only Streaming) %s\n\n%s\n\n%d / %d bytes\nPress q to quit\n",
+		"%s\nDownloading (%s)\nFile: %s\n\n%s\n\nSpeed: %s | %s\nDownloaded: %s / %s\n\nPress 'q' to quit",
+		asciiLogo,
+		header,
 		m.filename,
 		m.progress.View(),
-		m.downloaded,
-		m.totalSize,
+		speedStr,
+		etdStr,
+		format(float64(m.downloaded), "B"),
+		format(float64(m.totalSize), "B"),
 	)
+}
+
+// <== Helper Functions ==>
+func ScaleValue(b float64) (float64, string) {
+	const unit = 1024
+	if b < unit {
+		return b, ""
+	}
+
+	exp := int(math.Log(b) / math.Log(unit))
+
+	prefixes := "KMGTPE"
+
+	if exp > len(prefixes) {
+		exp = len(prefixes)
+	}
+
+	scaledValue := b / math.Pow(unit, float64(exp))
+
+	return scaledValue, string(prefixes[exp-1])
 }
