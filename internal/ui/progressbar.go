@@ -72,6 +72,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case TickMsg:
+		if m.rdi == nil || m.status == "error" {
+			return m, nil
+		}
 		nextTick := tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg { return TickMsg{} })
 		m.downloaded = m.rdi.BytesWritten.Load()
 		if m.totalSize > 0 {

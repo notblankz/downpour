@@ -89,9 +89,10 @@ type RangeDownloadInfo struct {
 	ReqURL       string
 	Filename     string
 	File         *os.File
+	EnableTrace  bool
 }
 
-func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string) *RangeDownloadInfo {
+func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, enableTrace bool) *RangeDownloadInfo {
 	workerLimit := 12
 	chunkSize := calculateChunkSize(totalSize, workerLimit)
 	return &RangeDownloadInfo{
@@ -103,6 +104,7 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string) *Ran
 		BytesWritten: &atomic.Int64{},
 		ReqURL:       reqURl,
 		Filename:     filename,
+		EnableTrace:  enableTrace,
 	}
 }
 
@@ -157,9 +159,15 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onError ErrorFunc) 
 func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *http.Client, onError ErrorFunc) {
 	defer wg.Done()
 
-	logger, logFile := getTraceLogger()
-	defer logFile.Close()
+	var logger *log.Logger
+	var logFile *os.File
 
+	if rdi.EnableTrace {
+		logger, logFile = getTraceLogger()
+		defer logFile.Close()
+	}
+
+	buf := make([]byte, 128*1024)
 	for chunkIndex := range rdi.ChunkChan {
 		startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
 		endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
@@ -171,24 +179,30 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *ht
 		}
 		req.Header.Add("Range", fmt.Sprintf("bytes=%v-%v", startPos, endPos))
 
-		trace := &httptrace.ClientTrace{
-			GotConn: func(connInfo httptrace.GotConnInfo) {
-				if connInfo.Reused {
-					logger.Printf("[Chunk %d] Connection Reused | IdleTime: %v", chunkIndex, connInfo.IdleTime)
-				} else {
-					logger.Printf("[Chunk %d] NEW Connection Dialed | Addr: %v", chunkIndex, connInfo.Conn.RemoteAddr())
-				}
-			},
-			WroteRequest: func(info httptrace.WroteRequestInfo) {
-				if info.Err != nil {
-					logger.Printf("[Chunk %d] Write Error: %v", chunkIndex, info.Err)
-				}
-			},
+		if rdi.EnableTrace {
+			trace := &httptrace.ClientTrace{
+				GotConn: func(connInfo httptrace.GotConnInfo) {
+					if connInfo.Reused {
+						logger.Printf("[Chunk %d] Connection Reused | IdleTime: %v", chunkIndex, connInfo.IdleTime)
+					} else {
+						logger.Printf("[Chunk %d] NEW Connection Dialed | Addr: %v", chunkIndex, connInfo.Conn.RemoteAddr())
+					}
+				},
+				WroteRequest: func(info httptrace.WroteRequestInfo) {
+					if info.Err != nil {
+						logger.Printf("[Chunk %d] Write Error: %v", chunkIndex, info.Err)
+					}
+				},
+			}
+
+			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 		}
 
-		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-
 		resp, err := client.Do(req)
+		if err != nil {
+			onError(fmt.Errorf("request failed for chunk %d: %w", chunkIndex, err))
+			continue
+		}
 
 		if resp.StatusCode == http.StatusPartialContent {
 			// write to file
@@ -197,7 +211,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *ht
 				offset:       startPos,
 				bytesWritten: rdi.BytesWritten,
 			}
-			_, err := io.Copy(writer, resp.Body)
+			_, err := io.CopyBuffer(writer, resp.Body, buf)
 			if err != nil {
 				onError(err)
 				resp.Body.Close()
