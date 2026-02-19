@@ -2,8 +2,8 @@ package ui
 
 import (
 	"downpour/internal/downloader"
+	"downpour/internal/utils"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
@@ -123,7 +123,7 @@ func (m Model) View() string {
 	}
 
 	format := func(val float64, suffix string) string {
-		v, p := ScaleValue(val)
+		v, p := utils.ScaleValue(val)
 		return fmt.Sprintf("%.2f %s%s", v, p, suffix)
 	}
 
@@ -165,24 +165,4 @@ func (m Model) View() string {
 		format(float64(m.downloaded), "B"),
 		format(float64(m.totalSize), "B"),
 	)
-}
-
-// <== Helper Functions ==>
-func ScaleValue(b float64) (float64, string) {
-	const unit = 1024
-	if b < unit {
-		return b, ""
-	}
-
-	exp := int(math.Log(b) / math.Log(unit))
-
-	prefixes := "KMGTPE"
-
-	if exp > len(prefixes) {
-		exp = len(prefixes)
-	}
-
-	scaledValue := b / math.Pow(unit, float64(exp))
-
-	return scaledValue, string(prefixes[exp-1])
 }

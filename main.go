@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -21,6 +22,9 @@ func main() {
 
 	httpLog := flag.Bool("httplog", false, "generate http trace logfile")
 	flag.BoolVar(httpLog, "hl", false, "generate http trace logfile (shorthand)")
+
+	telemetryFlag := flag.Bool("telemetry", false, "generates a CSV file with the telemetry about the download")
+	flag.BoolVar(telemetryFlag, "tel", false, "generates a CSV file with the telemetry about the download (shorthand)")
 	flag.Parse()
 
 	if *helpFlag {
@@ -76,6 +80,12 @@ func main() {
 	m := ui.InitialModel(filename, totalSize, acceptRangeBool, rdi)
 	p := tea.NewProgram(m)
 
+	if *telemetryFlag {
+		ctx, cancelTelemetry := context.WithCancel(context.Background())
+		defer cancelTelemetry()
+		go downloader.StartTelemtry(ctx, rdi, fmt.Sprintf("%s.csv", filename))
+	}
+
 	if acceptRangeBool {
 		go rdi.RangeDownload(
 			func() {
@@ -110,6 +120,7 @@ func main() {
 }
 
 // <== Helper Functions ==>
+// FIX
 func startErrorUI(err error) {
 	m := ui.InitialModel("Unknown", 0, false, nil)
 	p := tea.NewProgram(m)
