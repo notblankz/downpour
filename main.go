@@ -83,7 +83,7 @@ func main() {
 	if *telemetryFlag {
 		ctx, cancelTelemetry := context.WithCancel(context.Background())
 		defer cancelTelemetry()
-		go downloader.StartTelemtry(ctx, rdi, fmt.Sprintf("%s.csv", filename))
+		go downloader.StartTelemetry(ctx, rdi, fmt.Sprintf("%s.csv", filename))
 	}
 
 	if acceptRangeBool {
