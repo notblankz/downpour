@@ -22,6 +22,8 @@ type ErrorMsg struct {
 
 type TickMsg struct{}
 
+type VerifyingMsg struct{}
+
 // snapshot of the current state of the app
 type Model struct {
 	filename       string
@@ -103,6 +105,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "done"
 		m.elapsed = time.Since(m.startTime)
 		return m, tea.Quit
+	case VerifyingMsg:
+		m.status = "verifying"
+		return m, nil
 	case ErrorMsg:
 		m.err = msg.Err
 		m.status = "error"
@@ -129,13 +134,27 @@ func (m Model) View() string {
 
 	if m.status == "done" {
 		avgSpeed := float64(m.downloaded) / m.elapsed.Seconds()
+
+		filenameDisplay := m.filename
+		if m.rdi != nil && m.rdi.Checksum != nil {
+			filenameDisplay = fmt.Sprintf("%s (%s checksum verified)", m.filename, m.rdi.Checksum.AlgoName)
+		}
+
 		return fmt.Sprintf(
 			"%s\nDownload Complete!\n\n    File: %s\n    Size: %s\n    Time: %.2fs\n    Average Speed: %s\n\n  Press 'q' to exit",
 			asciiLogo,
-			m.filename,
+			filenameDisplay,
 			format(float64(m.downloaded), "B"),
 			m.elapsed.Seconds(),
 			format(avgSpeed, "B/s"),
+		)
+	}
+
+	if m.status == "verifying" {
+		return fmt.Sprintf(
+			"%s\nDownload Complete\n\nChecking Checksum of %s...\nPlease wait",
+			asciiLogo,
+			m.filename,
 		)
 	}
 
