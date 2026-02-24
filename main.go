@@ -25,6 +25,13 @@ func main() {
 
 	telemetryFlag := flag.Bool("telemetry", false, "generates a CSV file with the telemetry about the download")
 	flag.BoolVar(telemetryFlag, "tel", false, "generates a CSV file with the telemetry about the download (shorthand)")
+
+	checksumString := flag.String("checksumString", "", "verifies the downloaded file with this checksum")
+	flag.StringVar(checksumString, "checksum", "", "verifies the downloaded file with this checksum")
+
+	checksumAlgoString := flag.String("checksumAlgoString", "", "uses the specified algorithm to verify the checksum")
+	flag.StringVar(checksumAlgoString, "algorithm", "", "uses the specified algorithm to verify the checksum")
+
 	flag.Parse()
 
 	if *helpFlag {
@@ -86,10 +93,34 @@ func main() {
 		go downloader.StartTelemetry(ctx, rdi, fmt.Sprintf("%s.csv", filename))
 	}
 
+	if *checksumAlgoString != "" && *checksumString != "" {
+		algo := strings.ToLower(*checksumAlgoString)
+		hashStr := *checksumString
+
+		algoInfo, exists := downloader.SupportedChecksum[algo]
+		if !exists {
+			p.Send(ui.ErrorMsg{Err: fmt.Errorf("Error: Algorithm '%s' is not supported\n", algo)})
+		}
+
+		if len(hashStr) != algoInfo.ChecksumLen {
+			p.Send(ui.ErrorMsg{Err: fmt.Errorf("Error: Invalid %s checksum length. Expected %d characters, got %d\n", algo, algoInfo.ChecksumLen, len(hashStr))})
+		}
+
+		rdi.Checksum = &downloader.ChecksumInfo{
+			ExpectedHash: hashStr,
+			AlgoName:     algo,
+			Algo:         algoInfo,
+		}
+	}
+
 	if acceptRangeBool {
 		go rdi.RangeDownload(
 			func() {
 				p.Send(ui.DoneMsg{})
+			},
+
+			func() {
+				p.Send(ui.VerifyingMsg{})
 			},
 
 			func(err error) {
