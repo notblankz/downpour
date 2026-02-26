@@ -17,17 +17,27 @@ import (
 )
 
 func main() {
-	helpFlag := flag.Bool("help", false, "show help")
-	flag.BoolVar(helpFlag, "h", false, "show help (shorthand)")
+	var helpFlag, httpLog, telemetryFlag bool
+	var expectedHash, algorithm string
 
-	httpLog := flag.Bool("httplog", false, "generate http trace logfile")
-	flag.BoolVar(httpLog, "hl", false, "generate http trace logfile (shorthand)")
+	flag.BoolVar(&helpFlag, "help", false, "Show help message")
+	flag.BoolVar(&helpFlag, "h", false, "Show help message (shorthand)")
 
-	telemetryFlag := flag.Bool("telemetry", false, "generates a CSV file with the telemetry about the download")
-	flag.BoolVar(telemetryFlag, "tel", false, "generates a CSV file with the telemetry about the download (shorthand)")
+	flag.BoolVar(&httpLog, "httplog", false, "Generate HTTP trace logfile")
+	flag.BoolVar(&httpLog, "hl", false, "Generate HTTP trace logfile (shorthand)")
+
+	flag.BoolVar(&telemetryFlag, "telemetry", false, "Generate download telemetry CSV")
+	flag.BoolVar(&telemetryFlag, "tel", false, "Generate download telemetry CSV (shorthand)")
+
+	flag.StringVar(&expectedHash, "checksum", "", "Expected checksum hash")
+	flag.StringVar(&expectedHash, "c", "", "Expected checksum hash (shorthand)")
+
+	flag.StringVar(&algorithm, "algorithm", "", "Cryptographic algorithm")
+	flag.StringVar(&algorithm, "a", "", "Cryptographic algorithm (shorthand)")
+
 	flag.Parse()
 
-	if *helpFlag {
+	if helpFlag {
 		ui.PrintHelp()
 		return
 	}
@@ -76,20 +86,44 @@ func main() {
 	}
 	filename := downloader.GetFileName(parsedUrl, resp)
 
-	rdi := downloader.InitRangeDownloadInfo(filename, totalSize, urlString, *httpLog)
+	rdi := downloader.InitRangeDownloadInfo(filename, totalSize, urlString, httpLog)
 	m := ui.InitialModel(filename, totalSize, acceptRangeBool, rdi)
 	p := tea.NewProgram(m)
 
-	if *telemetryFlag {
+	if telemetryFlag {
 		ctx, cancelTelemetry := context.WithCancel(context.Background())
 		defer cancelTelemetry()
 		go downloader.StartTelemetry(ctx, rdi, fmt.Sprintf("%s.csv", filename))
+	}
+
+	if algorithm != "" && expectedHash != "" {
+		algo := strings.ToLower(algorithm)
+		hashStr := expectedHash
+
+		algoInfo, exists := downloader.SupportedChecksum[algo]
+		if !exists {
+			p.Send(ui.ErrorMsg{Err: fmt.Errorf("Error: Algorithm '%s' is not supported\n", algo)})
+		}
+
+		if len(hashStr) != algoInfo.ChecksumLen {
+			p.Send(ui.ErrorMsg{Err: fmt.Errorf("Error: Invalid %s checksum length. Expected %d characters, got %d\n", algo, algoInfo.ChecksumLen, len(hashStr))})
+		}
+
+		rdi.Checksum = &downloader.ChecksumInfo{
+			ExpectedHash: strings.ToLower(hashStr),
+			AlgoName:     algo,
+			Algo:         algoInfo,
+		}
 	}
 
 	if acceptRangeBool {
 		go rdi.RangeDownload(
 			func() {
 				p.Send(ui.DoneMsg{})
+			},
+
+			func() {
+				p.Send(ui.VerifyingMsg{})
 			},
 
 			func(err error) {

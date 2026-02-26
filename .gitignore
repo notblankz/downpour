@@ -33,3 +33,6 @@ go.work.sum
 
 # log files
 *.log
+
+# telemetry file
+*.csv

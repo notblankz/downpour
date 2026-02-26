@@ -20,6 +20,7 @@ import (
 type ProgressFunc func(n int64)
 type DoneFunc func()
 type ErrorFunc func(err error)
+type VerifyFunc func()
 
 const BufferSize = 64 * 1024
 
@@ -90,6 +91,7 @@ type RangeDownloadInfo struct {
 	Filename     string
 	File         *os.File
 	EnableTrace  bool
+	Checksum     *ChecksumInfo
 }
 
 func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, enableTrace bool) *RangeDownloadInfo {
@@ -108,9 +110,10 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, enab
 	}
 }
 
-func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onError ErrorFunc) {
+func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc, onError ErrorFunc) {
 	if rdi.TotalSize == 0 || rdi.Filename == "" {
 		onError(fmt.Errorf("Missing Information In the Provided Range Download Information"))
+		return
 	}
 
 	var wg sync.WaitGroup
@@ -153,6 +156,17 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onError ErrorFunc) 
 		close(rdi.ChunkChan)
 	}()
 	wg.Wait()
+	rdi.File.Close()
+
+	if rdi.Checksum != nil {
+		onVerify()
+		err := VerifyFile(rdi.Filename, rdi.Checksum.ExpectedHash, rdi.Checksum.Algo)
+		if err != nil {
+			onError(err)
+			return
+		}
+	}
+
 	onDone()
 }
 
@@ -198,31 +212,45 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *ht
 			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 		}
 
-		resp, err := client.Do(req)
-		if err != nil {
-			onError(fmt.Errorf("request failed for chunk %d: %w", chunkIndex, err))
+		// Chunk Retry
+		const maxRetries = 5
+		var resp *http.Response
+		var doErr error
+		var success bool
+
+		for range maxRetries {
+			resp, doErr = client.Do(req)
+			if doErr == nil && resp.StatusCode == http.StatusPartialContent {
+				success = true
+				break
+			}
+
+			if resp != nil {
+				resp.Body.Close()
+			}
+
+			// implement exponential backoff
+			time.Sleep(time.Second * 1)
+		}
+
+		if !success {
+			onError(fmt.Errorf("FATAL: chunk %d failed after %d retries. Last error: %v", chunkIndex, maxRetries, doErr))
 			continue
 		}
 
-		if resp.StatusCode == http.StatusPartialContent {
-			// write to file
-			writer := &OffsetWriter{
-				file:         rdi.File,
-				offset:       startPos,
-				bytesWritten: rdi.BytesWritten,
-			}
-			_, err := io.CopyBuffer(writer, resp.Body, buf)
-			if err != nil {
-				onError(err)
-				resp.Body.Close()
-				continue
-			}
-			resp.Body.Close()
-		} else {
-			onError(fmt.Errorf("Bad Status Code Received - %v", resp.StatusCode))
+		// write to file
+		writer := &OffsetWriter{
+			file:         rdi.File,
+			offset:       startPos,
+			bytesWritten: rdi.BytesWritten,
+		}
+		_, copyErr := io.CopyBuffer(writer, resp.Body, buf)
+		if copyErr != nil {
+			onError(err)
 			resp.Body.Close()
 			continue
 		}
+		resp.Body.Close()
 	}
 }
 
