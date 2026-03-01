@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-func StartTelemetry(ctx context.Context, rdi *RangeDownloadInfo, filename string) error {
-	f, err := os.Create(filename)
+func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
+	f, err := os.Create(fmt.Sprintf("%s/telemetry.csv", rdi.DirName))
 	if err != nil {
 		return fmt.Errorf("[WARNING] Could not create the telemetry CSV file")
 	}
