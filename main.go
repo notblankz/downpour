@@ -17,14 +17,14 @@ import (
 )
 
 func main() {
-	var helpFlag, httpLog, telemetryFlag bool
+	var helpFlag, httpLogFlag, telemetryFlag bool
 	var expectedHash, algorithm string
 
 	flag.BoolVar(&helpFlag, "help", false, "Show help message")
 	flag.BoolVar(&helpFlag, "h", false, "Show help message (shorthand)")
 
-	flag.BoolVar(&httpLog, "httplog", false, "Generate HTTP trace logfile")
-	flag.BoolVar(&httpLog, "hl", false, "Generate HTTP trace logfile (shorthand)")
+	flag.BoolVar(&httpLogFlag, "httplog", false, "Generate HTTP trace logfile")
+	flag.BoolVar(&httpLogFlag, "hl", false, "Generate HTTP trace logfile (shorthand)")
 
 	flag.BoolVar(&telemetryFlag, "telemetry", false, "Generate download telemetry CSV")
 	flag.BoolVar(&telemetryFlag, "tel", false, "Generate download telemetry CSV (shorthand)")
@@ -86,16 +86,20 @@ func main() {
 	}
 	filename := downloader.GetFileName(parsedUrl, resp)
 
-	rdi := downloader.InitRangeDownloadInfo(filename, totalSize, urlString, httpLog)
+	rdi, initErr := downloader.InitRangeDownloadInfo(filename, totalSize, urlString, httpLogFlag, telemetryFlag)
+	if initErr != nil {
+		startErrorUI(initErr)
+	}
 	m := ui.InitialModel(filename, totalSize, acceptRangeBool, rdi)
 	p := tea.NewProgram(m)
 
-	if telemetryFlag {
+	if rdi.EnableTelemetry {
 		ctx, cancelTelemetry := context.WithCancel(context.Background())
 		defer cancelTelemetry()
-		go downloader.StartTelemetry(ctx, rdi, fmt.Sprintf("%s.csv", filename))
+		go rdi.StartTelemetry(ctx)
 	}
 
+	// Move to InitRangeDownloadInfo()
 	if algorithm != "" && expectedHash != "" {
 		algo := strings.ToLower(algorithm)
 		hashStr := expectedHash

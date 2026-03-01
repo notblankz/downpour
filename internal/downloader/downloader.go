@@ -81,61 +81,30 @@ func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError
 }
 
 type RangeDownloadInfo struct {
-	ChunkChan    chan int
-	WorkerLimit  int
-	TotalChunks  int64
-	ChunkSize    int64
-	TotalSize    int64
-	BytesWritten *atomic.Int64
-	ReqURL       string
-	Filename     string
-	File         *os.File
-	EnableTrace  bool
-	Checksum     *ChecksumInfo
+	ChunkChan       chan int
+	Client          *http.Client
+	BufPool         *sync.Pool
+	Wg              *sync.WaitGroup
+	WorkerLimit     int
+	TotalChunks     int64
+	ChunkSize       int64
+	TotalSize       int64
+	BytesWritten    *atomic.Int64
+	ReqURL          string
+	Filename        string
+	DirName         string
+	File            *os.File
+	EnableTrace     bool
+	EnableTelemetry bool
+	Checksum        *ChecksumInfo
 }
 
-func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, enableTrace bool) *RangeDownloadInfo {
+func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, enableTrace bool, enableTelemetry bool) (*RangeDownloadInfo, error) {
 	workerLimit := 12
 	chunkSize := calculateChunkSize(totalSize, workerLimit)
-	return &RangeDownloadInfo{
-		ChunkChan:    make(chan int),
-		WorkerLimit:  workerLimit,
-		ChunkSize:    chunkSize,
-		TotalChunks:  int64(math.Ceil(float64(totalSize) / float64(chunkSize))),
-		TotalSize:    totalSize,
-		BytesWritten: &atomic.Int64{},
-		ReqURL:       reqURl,
-		Filename:     filename,
-		EnableTrace:  enableTrace,
-	}
-}
-
-func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc, onError ErrorFunc) {
-	if rdi.TotalSize == 0 || rdi.Filename == "" {
-		onError(fmt.Errorf("Missing Information In the Provided Range Download Information"))
-		return
-	}
-
-	var wg sync.WaitGroup
-	rdi.TotalChunks = int64(math.Ceil(float64(rdi.TotalSize) / float64(rdi.ChunkSize)))
-
-	// pre-allocate file with TotalSize
-	file, err := os.Create(rdi.Filename)
-	if err != nil {
-		onError(err)
-		return
-	}
-	rdi.File = file
-	defer file.Close()
-
-	err = rdi.File.Truncate(int64(rdi.TotalSize))
-	if err != nil {
-		onError(err)
-		return
-	}
 
 	tr := http.Transport{
-		MaxIdleConnsPerHost: rdi.WorkerLimit,
+		MaxIdleConnsPerHost: workerLimit,
 		MaxConnsPerHost:     0,
 		DisableKeepAlives:   false,
 		IdleConnTimeout:     90 * time.Second,
@@ -144,10 +113,69 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 	}
 	client := &http.Client{Transport: &tr}
 
-	// spawn go routines and wait for completion
-	wg.Add(rdi.WorkerLimit)
+	// create a new pool for the Workers
+	pool := &sync.Pool{
+		New: func() any {
+			buf := make([]byte, 128*1024)
+			return &buf
+		},
+	}
+
+	var dirName string
+	if enableTrace || enableTelemetry {
+		dirName = filename[:(strings.LastIndex(filename, ".") + 1)]
+		err := os.MkdirAll(dirName, os.ModePerm)
+		if err != nil {
+			return nil, err
+		}
+		filename = fmt.Sprintf("%s/%s", dirName, filename)
+	}
+
+	// pre-allocate file with TotalSize
+	file, err := os.Create(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	err = file.Truncate(int64(totalSize))
+	if err != nil {
+		return nil, err
+	}
+
+	// create a WaitGroup
+	var wg sync.WaitGroup
+
+	rdi := &RangeDownloadInfo{
+		ChunkChan:       make(chan int),
+		Client:          client,
+		BufPool:         pool,
+		Wg:              &wg,
+		WorkerLimit:     workerLimit,
+		ChunkSize:       chunkSize,
+		TotalChunks:     int64(math.Ceil(float64(totalSize) / float64(chunkSize))),
+		TotalSize:       totalSize,
+		BytesWritten:    &atomic.Int64{},
+		ReqURL:          reqURl,
+		Filename:        filename,
+		DirName:         dirName,
+		File:            file,
+		EnableTrace:     enableTrace,
+		EnableTelemetry: enableTelemetry,
+	}
+
+	return rdi, nil
+}
+
+func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc, onError ErrorFunc) {
+	if rdi.TotalSize == 0 || rdi.Filename == "" {
+		onError(fmt.Errorf("Missing Information In the Provided Range Download Information"))
+		return
+	}
+
+	// spawn downloader go routines and wait for completion
+	rdi.Wg.Add(rdi.WorkerLimit)
 	for i := 0; i < rdi.WorkerLimit; i++ {
-		go rdi.rangeDownloadWorker(&wg, client, onError)
+		go rdi.rangeDownloadWorker(onError)
 	}
 	go func() {
 		for chunkIndex := 0; int64(chunkIndex) < rdi.TotalChunks; chunkIndex++ {
@@ -155,7 +183,7 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 		}
 		close(rdi.ChunkChan)
 	}()
-	wg.Wait()
+	rdi.Wg.Wait()
 	rdi.File.Close()
 
 	if rdi.Checksum != nil {
@@ -170,18 +198,17 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 	onDone()
 }
 
-func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *http.Client, onError ErrorFunc) {
-	defer wg.Done()
+func (rdi *RangeDownloadInfo) rangeDownloadWorker(onError ErrorFunc) {
+	defer rdi.Wg.Done()
 
 	var logger *log.Logger
 	var logFile *os.File
 
 	if rdi.EnableTrace {
-		logger, logFile = getTraceLogger()
+		logger, logFile = rdi.getTraceLogger()
 		defer logFile.Close()
 	}
 
-	buf := make([]byte, 128*1024)
 	for chunkIndex := range rdi.ChunkChan {
 		startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
 		endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
@@ -219,7 +246,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *ht
 		var success bool
 
 		for range maxRetries {
-			resp, doErr = client.Do(req)
+			resp, doErr = rdi.Client.Do(req)
 			if doErr == nil && resp.StatusCode == http.StatusPartialContent {
 				success = true
 				break
@@ -244,13 +271,16 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *ht
 			offset:       startPos,
 			bytesWritten: rdi.BytesWritten,
 		}
-		_, copyErr := io.CopyBuffer(writer, resp.Body, buf)
+		buf := rdi.BufPool.Get().(*[]byte)
+		_, copyErr := io.CopyBuffer(writer, resp.Body, *buf)
 		if copyErr != nil {
-			onError(err)
 			resp.Body.Close()
+			rdi.BufPool.Put(buf)
+			onError(copyErr)
 			continue
 		}
 		resp.Body.Close()
+		rdi.BufPool.Put(buf)
 	}
 }
 
@@ -322,8 +352,8 @@ func calculateChunkSize(totalSize int64, workerLimit int) int64 {
 	return chunkSize
 }
 
-func getTraceLogger() (*log.Logger, *os.File) {
-	f, err := os.OpenFile("httptrace.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+func (rdi *RangeDownloadInfo) getTraceLogger() (*log.Logger, *os.File) {
+	f, err := os.OpenFile(fmt.Sprintf("%s/httptrace.log", rdi.DirName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		panic(err)
 	}
