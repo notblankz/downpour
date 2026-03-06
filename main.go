@@ -86,14 +86,19 @@ func main() {
 	}
 	filename := downloader.GetFileName(parsedUrl, resp)
 
-	rdi, initErr := downloader.InitRangeDownloadInfo(filename, totalSize, urlString, httpLogFlag, telemetryFlag)
+	statusFlags := downloader.StatusFlags{
+		EnableTrace:     httpLogFlag,
+		EnableTelemetry: telemetryFlag,
+	}
+
+	rdi, initErr := downloader.InitRangeDownloadInfo(filename, totalSize, urlString, statusFlags)
 	if initErr != nil {
 		startErrorUI(initErr)
 	}
 	m := ui.InitialModel(filename, totalSize, acceptRangeBool, rdi)
 	p := tea.NewProgram(m)
 
-	if rdi.EnableTelemetry {
+	if rdi.StatusFlags.EnableTelemetry {
 		ctx, cancelTelemetry := context.WithCancel(context.Background())
 		defer cancelTelemetry()
 		go rdi.StartTelemetry(ctx)
