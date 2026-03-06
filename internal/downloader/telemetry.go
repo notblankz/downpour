@@ -3,12 +3,14 @@ package downloader
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"time"
 )
 
 func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
-	f, err := os.Create(fmt.Sprintf("%s/telemetry.csv", rdi.DirName))
+	f, err := os.Create(filepath.Join(rdi.DirName, "telemetry.csv"))
 	if err != nil {
 		return fmt.Errorf("[WARNING] Could not create the telemetry CSV file")
 	}
@@ -37,4 +39,12 @@ func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
 			fmt.Fprintf(f, "%.0f,%d,%.0f\n", elapsed, currentTotal, float64(delta))
 		}
 	}
+}
+
+func (rdi *RangeDownloadInfo) getTraceLogger() (*log.Logger, *os.File) {
+	f, err := os.OpenFile(filepath.Join(rdi.DirName, "httptrace.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	return log.New(f, "", log.LstdFlags|log.Lmicroseconds), f
 }
