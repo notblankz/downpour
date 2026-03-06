@@ -3,7 +3,7 @@ package utils
 import "math"
 
 func ScaleValue(b float64) (float64, string) {
-	const unit = 1000
+	const unit = 1024
 	if b < unit {
 		return b, ""
 	}

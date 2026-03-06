@@ -20,7 +20,7 @@ const (
 type WorkerInfo struct {
 	ID                int
 	Chunk             ChunkInfo
-	Speed             int64
+	Speed             float64
 	TotalBytesWritten int64
 	LastBytes         int64
 	LastSample        time.Time
@@ -38,6 +38,6 @@ func (info *WorkerInfo) UpdateSpeed() {
 	info.LastBytes = info.TotalBytesWritten
 	deltaTime := time.Since(info.LastSample).Seconds()
 	info.LastSample = time.Now()
-	speed := float64(deltaBytes) / deltaTime
-	info.Speed = int64(speed)
+	curSpeed := float64(deltaBytes) / deltaTime
+	info.Speed = (info.Speed * 0.6) + (curSpeed * 0.4)
 }
