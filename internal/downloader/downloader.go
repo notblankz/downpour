@@ -24,9 +24,9 @@ type DoneFunc func()
 type ErrorFunc func(err error)
 type VerifyFunc func()
 
-const bufferSize = 64 * 1024    // 64KB
-const minChunkSize = 512 * 1024 // 512KB
-const maxChunkSize = 512 * 1024 // 16MB
+const bufferSize = 64 * 1024         // 64KB
+const minChunkSize = 256 * 1024      // 256KB
+const maxChunkSize = 1 * 1024 * 1024 // 1MB
 const workerLimit = 8
 
 func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
@@ -111,7 +111,17 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 		ReadBufferSize:      bufferSize,
 		WriteBufferSize:     bufferSize,
 	}
-	client := &http.Client{Transport: &tr}
+	client := &http.Client{
+		Transport: &tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("Too many redirects")
+			}
+			// A small safeguard to make sure the correct range headers are copied over through the redirections
+			req.Header.Set("Range", via[0].Header.Get("Range"))
+			return nil
+		},
+	}
 
 	var dirName string
 	if statusFlags.EnableTrace || statusFlags.EnableTelemetry {
