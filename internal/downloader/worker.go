@@ -28,16 +28,17 @@ type WorkerInfo struct {
 	StartedAt         time.Time
 }
 
-func (info *WorkerInfo) UpdateSpeed() {
+func (info *WorkerInfo) UpdateSpeed() float64 {
 	if info.LastSample.IsZero() {
 		info.LastBytes = info.TotalBytesWritten
 		info.LastSample = time.Now()
-		return
+		return 0
 	}
 	deltaBytes := info.TotalBytesWritten - info.LastBytes
 	info.LastBytes = info.TotalBytesWritten
 	deltaTime := time.Since(info.LastSample).Seconds()
 	info.LastSample = time.Now()
 	curSpeed := float64(deltaBytes) / deltaTime
-	info.Speed = (info.Speed * 0.6) + (curSpeed * 0.4)
+	info.Speed = curSpeed
+	return curSpeed
 }
