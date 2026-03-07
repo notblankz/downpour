@@ -307,7 +307,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 		cw := rdi.WriterPool.Get().(*chunkWriter)
 		cw.worker = workerInfo
 		cw.offset = startPos
-		ncopy, copyErr := io.CopyBuffer(cw, resp.Body, cw.buf)
+		_, copyErr := io.CopyBuffer(cw, resp.Body, cw.buf)
 		if copyErr != nil {
 			resp.Body.Close()
 			rdi.WriterPool.Put(cw)
@@ -316,7 +316,6 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 		}
 		rdi.WriterPool.Put(cw)
 		resp.Body.Close()
-		workerInfo.TotalBytesWritten += ncopy
 		workerInfo.Status = WorkerStatusIdle
 	}
 }

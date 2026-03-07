@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -16,19 +17,27 @@ func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "Timestamp(s),TotalBytes,Speed(B/s)\n")
+	// Build worker's speed headers
+	var workersSpeedHeader strings.Builder
+	for _, workerInfo := range rdi.Workers.Slice {
+		fmt.Fprintf(&workersSpeedHeader, "W%d(B/s),", workerInfo.ID)
+	}
+	fmt.Fprintf(f, "Timestamp(s),TotalBytes,Speed(B/s),%s\n", workersSpeedHeader.String())
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	var lastDownloaded int64
 	startTime := time.Now()
+	lastWorkerBytes := make([]int64, rdi.Workers.Limit)
+	lastWorkerSnapshot := time.Now()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case t := <-ticker.C:
+			// download data
 			currentTotal := rdi.BytesWritten.Load()
 
 			delta := currentTotal - lastDownloaded
@@ -36,7 +45,19 @@ func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
 			lastDownloaded = currentTotal
 
 			elapsed := t.Sub(startTime).Seconds()
-			fmt.Fprintf(f, "%.0f,%d,%.0f\n", elapsed, currentTotal, float64(delta))
+
+			// worker details
+			var workersSpeed strings.Builder
+			currTime := time.Now()
+			for i, workerInfo := range rdi.Workers.Slice {
+				elapsedWorkerTime := time.Since(lastWorkerSnapshot)
+				delta := workerInfo.TotalBytesWritten - lastWorkerBytes[i]
+				currWorkerSpeed := float64(delta) / elapsedWorkerTime.Seconds()
+				lastWorkerBytes[i] = workerInfo.TotalBytesWritten
+				fmt.Fprintf(&workersSpeed, "%.0f,", currWorkerSpeed)
+			}
+			lastWorkerSnapshot = currTime
+			fmt.Fprintf(f, "%.0f,%d,%.0f,%s\n", elapsed, currentTotal, float64(delta), workersSpeed.String())
 		}
 	}
 }

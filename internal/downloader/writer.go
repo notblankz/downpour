@@ -35,6 +35,7 @@ func (cw *chunkWriter) Write(p []byte) (int, error) {
 	}
 	cw.offset += int64(nwrite)
 	cw.worker.Chunk.BytesDownloaded += int64(nwrite)
+	cw.worker.TotalBytesWritten += int64(nwrite)
 	cw.globalBytesWritten.Add(int64(nwrite))
 	return nwrite, nil
 }
