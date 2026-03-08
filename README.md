@@ -23,9 +23,15 @@ go build -o downpour.exe
 ---
 
 ### Current Status
-Status: Functional & Structurally Sound ***(Achieved perfect SHA256 match on a 6.6GB Ubuntu ISO over a 12-worker pool)***
-Current Throughput: Peaks at ***40+ MB/s***
-Time Taken: ***350s***
+- Status: Much lesser dips and peaks during the download, instead maintains a much more smooth graph *(less brutal sawtoothing)*
+- Current Throughput:  ***10GB sustained download at 22.21 MB/s average***
+- Test Environment:
+    - Tested on local machine *(AMD Ryzen 7 250 + 16GB RAM + RTX 5060 Laptop GPU)*
+    - Test download: `"https://sin-speed.hetzner.com/10GB.bin"`
+- Time Taken: ***461.35s***
 
-Below is the raw telemetry visualization from the 6.6GB stress test
-![Downpour Telemetry Visualization as on 20 February 2026](docs/assets/20-02-2026-visualization.png)
+Below is the raw Global telemetry visualization from the 10GB stress test
+![Downpour Global Telemetry Visualization as on 08 March 2026](docs/assets/10GB-8-March-Global.png)
+
+Below is the telemetry for download speeds of each worker
+![Downpour Worker Telemetry Visualization as on 08 March 2026](docs/assets/10GB-8-March-Worker.png)

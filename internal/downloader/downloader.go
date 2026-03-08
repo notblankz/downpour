@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,24 +24,10 @@ type DoneFunc func()
 type ErrorFunc func(err error)
 type VerifyFunc func()
 
-const BufferSize = 64 * 1024
-
-// struct to implement io.Writer for custom use of WriteAt() instead of Write() in io.Copy()
-type OffsetWriter struct {
-	file         *os.File
-	offset       int64
-	bytesWritten *atomic.Int64
-}
-
-func (ow *OffsetWriter) Write(p []byte) (int, error) {
-	nwrite, err := ow.file.WriteAt(p, int64(ow.offset))
-	if err != nil {
-		return nwrite, fmt.Errorf("Could not write to file at offset %v - %v", ow.offset, err)
-	}
-	ow.offset += int64(nwrite)
-	ow.bytesWritten.Add(int64(nwrite))
-	return nwrite, nil
-}
+const bufferSize = 64 * 1024         // 64KB
+const minChunkSize = 256 * 1024      // 256KB
+const maxChunkSize = 1 * 1024 * 1024 // 1MB
+const workerLimit = 8
 
 func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
 	req, err := http.NewRequest("GET", u.String(), nil)
@@ -70,7 +58,7 @@ func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError
 		return
 	}
 
-	_, err = copy(resp.Body, file, onProgress)
+	_, err = streamCopy(resp.Body, file, onProgress)
 	if err != nil {
 		onError(err)
 		return
@@ -80,34 +68,129 @@ func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError
 	file.Close()
 }
 
+type StatusFlags struct {
+	EnableTrace     bool
+	EnableTelemetry bool
+}
+
+type Workers struct {
+	Limit int
+	Slice []*WorkerInfo
+}
 type RangeDownloadInfo struct {
 	ChunkChan    chan int
-	WorkerLimit  int
+	Client       *http.Client
+	WriterPool   *sync.Pool
+	Wg           *sync.WaitGroup
+	Workers      Workers
 	TotalChunks  int64
 	ChunkSize    int64
 	TotalSize    int64
 	BytesWritten *atomic.Int64
 	ReqURL       string
 	Filename     string
+	DirName      string
 	File         *os.File
-	EnableTrace  bool
+	StatusFlags  StatusFlags
 	Checksum     *ChecksumInfo
 }
 
-func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, enableTrace bool) *RangeDownloadInfo {
-	workerLimit := 12
-	chunkSize := calculateChunkSize(totalSize, workerLimit)
-	return &RangeDownloadInfo{
+func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, statusFlags StatusFlags) (*RangeDownloadInfo, error) {
+	chunkSize := int64(maxChunkSize)
+	if totalSize < minChunkSize {
+		chunkSize = totalSize
+	}
+
+	tr := http.Transport{
+		MaxIdleConnsPerHost: workerLimit,
+		MaxConnsPerHost:     0,
+		DisableKeepAlives:   false,
+		IdleConnTimeout:     10 * time.Second,
+		ForceAttemptHTTP2:   false,
+		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		ReadBufferSize:      bufferSize,
+		WriteBufferSize:     bufferSize,
+	}
+	client := &http.Client{
+		Transport: &tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("Too many redirects")
+			}
+			// A small safeguard to make sure the correct range headers are copied over through the redirections
+			req.Header.Set("Range", via[0].Header.Get("Range"))
+			return nil
+		},
+	}
+
+	var dirName string
+	if statusFlags.EnableTrace || statusFlags.EnableTelemetry {
+		dirName = filename[:(strings.LastIndex(filename, "."))]
+		err := os.MkdirAll(dirName, os.ModePerm)
+		if err != nil {
+			return nil, err
+		}
+		filename = filepath.Join(dirName, filename)
+	}
+
+	// pre-allocate file with TotalSize
+	file, err := os.Create(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	err = file.Truncate(int64(totalSize))
+	if err != nil {
+		return nil, err
+	}
+
+	// create a WaitGroup and a Atomic Int64 Variable
+	var wg sync.WaitGroup
+	var bytesWritten atomic.Int64
+
+	workerSlice := make([]*WorkerInfo, workerLimit)
+	for i := range workerSlice {
+		workerInfo := &WorkerInfo{
+			ID:     i,
+			Status: WorkerStatusIdle,
+		}
+		workerSlice[i] = workerInfo
+	}
+	workers := Workers{
+		Limit: workerLimit,
+		Slice: workerSlice,
+	}
+
+	// create a new pool for the Workers
+	pool := &sync.Pool{
+		New: func() any {
+			buf := make([]byte, 512*1024)
+			return &chunkWriter{
+				buf:                buf,
+				file:               file,
+				globalBytesWritten: &bytesWritten,
+			}
+		},
+	}
+
+	rdi := &RangeDownloadInfo{
 		ChunkChan:    make(chan int),
-		WorkerLimit:  workerLimit,
+		Client:       client,
+		WriterPool:   pool,
+		Wg:           &wg,
+		Workers:      workers,
 		ChunkSize:    chunkSize,
 		TotalChunks:  int64(math.Ceil(float64(totalSize) / float64(chunkSize))),
 		TotalSize:    totalSize,
-		BytesWritten: &atomic.Int64{},
+		BytesWritten: &bytesWritten,
 		ReqURL:       reqURl,
 		Filename:     filename,
-		EnableTrace:  enableTrace,
+		DirName:      dirName,
+		File:         file,
+		StatusFlags:  statusFlags,
 	}
+
+	return rdi, nil
 }
 
 func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc, onError ErrorFunc) {
@@ -116,38 +199,10 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 		return
 	}
 
-	var wg sync.WaitGroup
-	rdi.TotalChunks = int64(math.Ceil(float64(rdi.TotalSize) / float64(rdi.ChunkSize)))
-
-	// pre-allocate file with TotalSize
-	file, err := os.Create(rdi.Filename)
-	if err != nil {
-		onError(err)
-		return
-	}
-	rdi.File = file
-	defer file.Close()
-
-	err = rdi.File.Truncate(int64(rdi.TotalSize))
-	if err != nil {
-		onError(err)
-		return
-	}
-
-	tr := http.Transport{
-		MaxIdleConnsPerHost: rdi.WorkerLimit,
-		MaxConnsPerHost:     0,
-		DisableKeepAlives:   false,
-		IdleConnTimeout:     90 * time.Second,
-		ReadBufferSize:      BufferSize,
-		WriteBufferSize:     BufferSize,
-	}
-	client := &http.Client{Transport: &tr}
-
-	// spawn go routines and wait for completion
-	wg.Add(rdi.WorkerLimit)
-	for i := 0; i < rdi.WorkerLimit; i++ {
-		go rdi.rangeDownloadWorker(&wg, client, onError)
+	// spawn downloader go routines and wait for completion
+	rdi.Wg.Add(rdi.Workers.Limit)
+	for i := 0; i < rdi.Workers.Limit; i++ {
+		go rdi.rangeDownloadWorker(rdi.Workers.Slice[i], onError)
 	}
 	go func() {
 		for chunkIndex := 0; int64(chunkIndex) < rdi.TotalChunks; chunkIndex++ {
@@ -155,7 +210,7 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 		}
 		close(rdi.ChunkChan)
 	}()
-	wg.Wait()
+	rdi.Wg.Wait()
 	rdi.File.Close()
 
 	if rdi.Checksum != nil {
@@ -170,90 +225,102 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 	onDone()
 }
 
-func (rdi *RangeDownloadInfo) rangeDownloadWorker(wg *sync.WaitGroup, client *http.Client, onError ErrorFunc) {
-	defer wg.Done()
+func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onError ErrorFunc) {
+	workerInfo.StartedAt = time.Now()
+	defer rdi.Wg.Done()
 
 	var logger *log.Logger
 	var logFile *os.File
 
-	if rdi.EnableTrace {
-		logger, logFile = getTraceLogger()
+	if rdi.StatusFlags.EnableTrace {
+		logger, logFile = rdi.getTraceLogger()
 		defer logFile.Close()
 	}
 
-	buf := make([]byte, 128*1024)
 	for chunkIndex := range rdi.ChunkChan {
+		workerInfo.Status = WorkerStatusIdle
 		startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
 		endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
 
-		req, err := http.NewRequest("GET", rdi.ReqURL, nil)
-		if err != nil {
-			onError(err)
-			continue
-		}
-		req.Header.Add("Range", fmt.Sprintf("bytes=%v-%v", startPos, endPos))
+		// Add information to the WorkerInfo
+		workerInfo.Chunk.Index = int64(chunkIndex)
+		workerInfo.Chunk.Size = endPos - startPos
+		workerInfo.Chunk.BytesDownloaded = 0
 
-		if rdi.EnableTrace {
-			trace := &httptrace.ClientTrace{
-				GotConn: func(connInfo httptrace.GotConnInfo) {
-					if connInfo.Reused {
-						logger.Printf("[Chunk %d] Connection Reused | IdleTime: %v", chunkIndex, connInfo.IdleTime)
-					} else {
-						logger.Printf("[Chunk %d] NEW Connection Dialed | Addr: %v", chunkIndex, connInfo.Conn.RemoteAddr())
-					}
-				},
-				WroteRequest: func(info httptrace.WroteRequestInfo) {
-					if info.Err != nil {
-						logger.Printf("[Chunk %d] Write Error: %v", chunkIndex, info.Err)
-					}
-				},
-			}
-
-			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-		}
-
-		// Chunk Retry
 		const maxRetries = 5
 		var resp *http.Response
 		var doErr error
 		var success bool
 
 		for range maxRetries {
-			resp, doErr = client.Do(req)
+			workerInfo.Status = WorkerStatusRequesting
+			req, err := http.NewRequest("GET", rdi.ReqURL, nil)
+			if err != nil {
+				onError(err)
+				break
+			}
+			req.Header.Add("Range", fmt.Sprintf("bytes=%v-%v", startPos, endPos))
+
+			if rdi.StatusFlags.EnableTrace {
+				trace := &httptrace.ClientTrace{
+					GotConn: func(connInfo httptrace.GotConnInfo) {
+						if connInfo.Reused {
+							logger.Printf("[Worker %d::Chunk %d] Connection Reused | IdleTime: %v", workerInfo.ID, workerInfo.Chunk.Index, connInfo.IdleTime)
+						} else {
+							logger.Printf("[Worker %d::Chunk %d] NEW Connection Dialed | Addr: %v", workerInfo.ID, workerInfo.Chunk.Index, connInfo.Conn.RemoteAddr())
+						}
+					},
+					WroteRequest: func(info httptrace.WroteRequestInfo) {
+						if info.Err != nil {
+							logger.Printf("[Worker %d::Chunk %d] Write Error: %v", workerInfo.ID, workerInfo.Chunk.Index, info.Err)
+						}
+					},
+				}
+
+				req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+			}
+
+			resp, doErr = rdi.Client.Do(req)
 			if doErr == nil && resp.StatusCode == http.StatusPartialContent {
 				success = true
 				break
 			}
 
+			// close the response body if we received some other Reponse apart from StatusPartialContent
 			if resp != nil {
 				resp.Body.Close()
 			}
+
+			workerInfo.Status = WorkerStatusRetrying
 
 			// implement exponential backoff
 			time.Sleep(time.Second * 1)
 		}
 
 		if !success {
-			onError(fmt.Errorf("FATAL: chunk %d failed after %d retries. Last error: %v", chunkIndex, maxRetries, doErr))
+			onError(fmt.Errorf("FATAL: worker %d failed on chunk %d after %d retries. Last error: %v", workerInfo.ID, workerInfo.Chunk.Index, maxRetries, doErr))
 			continue
 		}
 
 		// write to file
-		writer := &OffsetWriter{
-			file:         rdi.File,
-			offset:       startPos,
-			bytesWritten: rdi.BytesWritten,
-		}
-		_, copyErr := io.CopyBuffer(writer, resp.Body, buf)
+		workerInfo.Status = WorkerStatusDownloading
+		cw := rdi.WriterPool.Get().(*chunkWriter)
+		cw.worker = workerInfo
+		cw.offset = startPos
+		_, copyErr := io.CopyBuffer(cw, resp.Body, cw.buf)
 		if copyErr != nil {
-			onError(err)
 			resp.Body.Close()
+			rdi.WriterPool.Put(cw)
+			onError(copyErr)
 			continue
 		}
+		rdi.WriterPool.Put(cw)
 		resp.Body.Close()
+		workerInfo.Status = WorkerStatusIdle
 	}
 }
 
+// <== Helper Functions ==>
 func GetFileName(u *url.URL, resp *http.Response) string {
 	contentDisposition := resp.Header.Get("Content-Disposition")
 
@@ -270,62 +337,4 @@ func GetFileName(u *url.URL, resp *http.Response) string {
 	}
 	pathSlice := strings.Split(u.Path, "/")
 	return pathSlice[len(pathSlice)-1]
-}
-
-// <== Helper Functions ==>
-// copy with progress callback
-func copy(src io.Reader, dst io.Writer, onProgress ProgressFunc) (int64, error) {
-	var totalWritten, chunkWritten int64
-	buf := make([]byte, BufferSize)
-
-	for {
-		nread, rerr := src.Read(buf)
-		if nread > 0 {
-			chunkWritten = 0
-			for chunkWritten < int64(nread) {
-				nwrite, werr := dst.Write(buf[chunkWritten:nread])
-				if werr != nil {
-					return totalWritten, werr
-				}
-				chunkWritten += int64(nwrite)
-			}
-			totalWritten += chunkWritten
-			onProgress(chunkWritten)
-		}
-
-		if rerr != nil {
-			if rerr == io.EOF {
-				return totalWritten, nil
-			}
-			return totalWritten, rerr
-		}
-	}
-}
-
-func calculateChunkSize(totalSize int64, workerLimit int) int64 {
-	const minChunkSize = 1 * 1024 * 1024  // 1MB
-	const maxChunkSize = 64 * 1024 * 1024 // 64MB
-	const targetChunksPerWorker = 4
-
-	if totalSize <= 0 {
-		return maxChunkSize
-	}
-
-	chunkSize := totalSize / (int64(workerLimit) * targetChunksPerWorker)
-
-	if chunkSize < minChunkSize {
-		return minChunkSize
-	}
-	if chunkSize > maxChunkSize {
-		return maxChunkSize
-	}
-	return chunkSize
-}
-
-func getTraceLogger() (*log.Logger, *os.File) {
-	f, err := os.OpenFile("httptrace.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		panic(err)
-	}
-	return log.New(f, "", log.LstdFlags|log.Lmicroseconds), f
 }
