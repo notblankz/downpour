@@ -100,12 +100,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.downloaded = currentTotal
 		m.lastDownloaded = currentTotal
 
-		// Per worker updates
-		for i, worker := range m.rdi.Workers.Slice {
-			currSpeed := worker.UpdateSpeed()
-			smoothSpeed := m.smoothenSpeed(m.workerSpeeds[i], currSpeed)
-			m.workerSpeeds[i] = smoothSpeed
-		}
+		// send next tick
 		nextTick := tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return TickMsg{} })
 
 		// Update Global progress bar percentage
@@ -200,8 +195,8 @@ func (m Model) View() string {
 	)
 }
 
-func (m Model) formatWorker(index int, workerInfo *downloader.WorkerInfo) string {
-	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, m.formatBytes(m.workerSpeeds[index], "B/s"), fmt.Sprintf("#%d", workerInfo.Chunk.Index))
+func (m Model) formatWorker(workerInfo *downloader.WorkerInfo) string {
+	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, m.formatBytes(workerInfo.Speed, "B/s"), fmt.Sprintf("#%d", workerInfo.Chunk.Index))
 }
 
 func (m Model) formatWorkerGrid(rdi *downloader.RangeDownloadInfo) string {
@@ -209,8 +204,8 @@ func (m Model) formatWorkerGrid(rdi *downloader.RangeDownloadInfo) string {
 	var sb strings.Builder
 	for i := 0; i < (rows * 2); i += 2 {
 		fmt.Fprintf(&sb, "\n")
-		firstWorkerStr := m.formatWorker(i, rdi.Workers.Slice[i])
-		secondWorkerStr := m.formatWorker(i+1, rdi.Workers.Slice[i+1])
+		firstWorkerStr := m.formatWorker(rdi.Workers.Slice[i])
+		secondWorkerStr := m.formatWorker(rdi.Workers.Slice[i+1])
 		fmt.Fprintf(&sb, "%-36s%s", firstWorkerStr, secondWorkerStr)
 	}
 

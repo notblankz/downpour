@@ -29,8 +29,6 @@ func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
 
 	var lastDownloaded int64
 	startTime := time.Now()
-	lastWorkerBytes := make([]int64, rdi.Workers.Limit)
-	lastWorkerSnapshot := time.Now()
 
 	for {
 		select {
@@ -48,15 +46,10 @@ func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
 
 			// worker details
 			var workersSpeed strings.Builder
-			currTime := time.Now()
-			for i, workerInfo := range rdi.Workers.Slice {
-				elapsedWorkerTime := time.Since(lastWorkerSnapshot)
-				delta := workerInfo.TotalBytesWritten - lastWorkerBytes[i]
-				currWorkerSpeed := float64(delta) / elapsedWorkerTime.Seconds()
-				lastWorkerBytes[i] = workerInfo.TotalBytesWritten
-				fmt.Fprintf(&workersSpeed, "%.0f,", currWorkerSpeed)
+			for _, workerInfo := range rdi.Workers.Slice {
+				workerInfo.UpdateSpeed()
+				fmt.Fprintf(&workersSpeed, "%.0f,", workerInfo.Speed)
 			}
-			lastWorkerSnapshot = currTime
 			fmt.Fprintf(f, "%.0f,%d,%.0f,%s\n", elapsed, currentTotal, float64(delta), workersSpeed.String())
 		}
 	}
