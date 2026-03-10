@@ -100,12 +100,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.downloaded = currentTotal
 		m.lastDownloaded = currentTotal
 
-		// Per worker updates
-		for i, worker := range m.rdi.Workers.Slice {
-			currSpeed := worker.UpdateSpeed()
-			smoothSpeed := m.smoothenSpeed(m.workerSpeeds[i], currSpeed)
-			m.workerSpeeds[i] = smoothSpeed
-		}
+		// send next tick
 		nextTick := tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return TickMsg{} })
 
 		// Update Global progress bar percentage
@@ -152,10 +147,10 @@ func (m Model) View() string {
 			"%s\nDownload Complete!\n\n    Filename: %s\n    Downloaded: %s (Filesize: %s)\n    Time: %.2fs\n    Average Speed: %s\n\n  Press 'q' to exit",
 			asciiLogo,
 			filenameDisplay,
-			m.formatBytes(float64(m.rdi.BytesWritten.Load()), "B"),
-			m.formatBytes(float64(m.rdi.TotalSize), "B"),
+			utils.FormatSpeedString(float64(m.rdi.BytesWritten.Load()), "B"),
+			utils.FormatSpeedString(float64(m.rdi.TotalSize), "B"),
 			m.elapsed.Seconds(),
-			m.formatBytes(avgSpeed, "B/s"),
+			utils.FormatSpeedString(avgSpeed, "B/s"),
 		)
 	}
 
@@ -172,7 +167,7 @@ func (m Model) View() string {
 		header = "Parallel Multi-Worker"
 	}
 
-	speedStr := m.formatBytes(m.currentSpeed, "B/s")
+	speedStr := utils.FormatSpeedString(m.currentSpeed, "B/s")
 	var etdStr string
 	if m.currentSpeed > 0 && m.totalSize > 0 {
 		remaining := float64(m.totalSize - m.downloaded)
@@ -183,14 +178,15 @@ func (m Model) View() string {
 	}
 
 	return fmt.Sprintf(
-		"%s\nFile: %s\nMode: %s\n\nProgress: %s\n\nSize: %-30s\nSpeed: %-29s%s\n\nIndividual Worker Speeds:%s\n\nPress 'q' to quit",
+		"%s\nFile: %s\nMode: %s\n\nProgress: %s\n\nSize: %-30s\nSpeed: %-29s%s\nWorker's Baseline Speed:%s\n\nIndividual Worker Speeds:%s\n\nPress 'q' to quit",
 		asciiLogo,
 		m.filename,
 		header,
 		m.progress.View(),
-		fmt.Sprintf("%s / %s", m.formatBytes(float64(m.downloaded), "B"), m.formatBytes(float64(m.totalSize), "B")),
+		fmt.Sprintf("%s / %s", utils.FormatSpeedString(float64(m.downloaded), "B"), utils.FormatSpeedString(float64(m.totalSize), "B")),
 		speedStr,
 		etdStr,
+		utils.FormatSpeedString(m.rdi.WorkerBaselineSpeed, "B/s"),
 		func() string {
 			if !m.acceptRange || m.rdi == nil {
 				return " N/A (Streaming)"
@@ -200,8 +196,8 @@ func (m Model) View() string {
 	)
 }
 
-func (m Model) formatWorker(index int, workerInfo *downloader.WorkerInfo) string {
-	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, m.formatBytes(m.workerSpeeds[index], "B/s"), fmt.Sprintf("#%d", workerInfo.Chunk.Index))
+func (m Model) formatWorker(workerInfo *downloader.WorkerInfo) string {
+	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, utils.FormatSpeedString(workerInfo.Speed, "B/s"), fmt.Sprintf("#%d", workerInfo.Chunk.Index))
 }
 
 func (m Model) formatWorkerGrid(rdi *downloader.RangeDownloadInfo) string {
@@ -209,19 +205,10 @@ func (m Model) formatWorkerGrid(rdi *downloader.RangeDownloadInfo) string {
 	var sb strings.Builder
 	for i := 0; i < (rows * 2); i += 2 {
 		fmt.Fprintf(&sb, "\n")
-		firstWorkerStr := m.formatWorker(i, rdi.Workers.Slice[i])
-		secondWorkerStr := m.formatWorker(i+1, rdi.Workers.Slice[i+1])
+		firstWorkerStr := m.formatWorker(rdi.Workers.Slice[i])
+		secondWorkerStr := m.formatWorker(rdi.Workers.Slice[i+1])
 		fmt.Fprintf(&sb, "%-36s%s", firstWorkerStr, secondWorkerStr)
 	}
 
 	return sb.String()
-}
-
-func (m Model) formatBytes(val float64, suffix string) string {
-	v, p := utils.ScaleValue(val)
-	return fmt.Sprintf("%.2f %s%s", v, p, suffix)
-}
-
-func (m Model) smoothenSpeed(oldSpeed float64, newSpeed float64) float64 {
-	return (0.6 * oldSpeed) + (0.4 * newSpeed)
 }
