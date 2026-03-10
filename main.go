@@ -104,6 +104,10 @@ func main() {
 		go rdi.StartTelemetry(ctx)
 	}
 
+	ctx, cancelHealthMonitor := context.WithCancel(context.Background())
+	defer cancelHealthMonitor()
+	go rdi.StartHealthMonitor(ctx)
+
 	// Move to InitRangeDownloadInfo()
 	if algorithm != "" && expectedHash != "" {
 		algo := strings.ToLower(algorithm)

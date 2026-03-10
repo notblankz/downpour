@@ -1,6 +1,9 @@
 package utils
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 func ScaleValue(b float64) (float64, string) {
 	const unit = 1024
@@ -19,4 +22,9 @@ func ScaleValue(b float64) (float64, string) {
 	scaledValue := b / math.Pow(unit, float64(exp))
 
 	return scaledValue, string(prefixes[exp-1])
+}
+
+func FormatSpeedString(toScaleValue float64, prefixString string) string {
+	scaledValue, scaledPrefix := ScaleValue(toScaleValue)
+	return fmt.Sprintf("%.2f%s%s", scaledValue, scaledPrefix, prefixString)
 }
