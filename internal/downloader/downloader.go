@@ -1,7 +1,7 @@
 package downloader
 
 import (
-	"crypto/tls"
+	"downpour/internal/utils"
 	"fmt"
 	"io"
 	"log"
@@ -26,8 +26,8 @@ type VerifyFunc func()
 
 const bufferSize = 64 * 1024         // 64KB
 const minChunkSize = 256 * 1024      // 256KB
-const maxChunkSize = 1 * 1024 * 1024 // 1MB
-const workerLimit = 8
+const maxChunkSize = 2 * 1024 * 1024 // 2MB
+const workerLimit = 32
 
 func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
 	req, err := http.NewRequest("GET", u.String(), nil)
@@ -78,49 +78,27 @@ type Workers struct {
 	Slice []*WorkerInfo
 }
 type RangeDownloadInfo struct {
-	ChunkChan    chan int
-	Client       *http.Client
-	WriterPool   *sync.Pool
-	Wg           *sync.WaitGroup
-	Workers      Workers
-	TotalChunks  int64
-	ChunkSize    int64
-	TotalSize    int64
-	BytesWritten *atomic.Int64
-	ReqURL       string
-	Filename     string
-	DirName      string
-	File         *os.File
-	StatusFlags  StatusFlags
-	Checksum     *ChecksumInfo
+	ChunkChan           chan int
+	WriterPool          *sync.Pool
+	Wg                  *sync.WaitGroup
+	Workers             Workers
+	TotalChunks         int64
+	ChunkSize           int64
+	TotalSize           int64
+	BytesWritten        *atomic.Int64
+	ReqURL              string
+	Filename            string
+	DirName             string
+	File                *os.File
+	StatusFlags         StatusFlags
+	Checksum            *ChecksumInfo
+	WorkerBaselineSpeed float64
 }
 
 func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, statusFlags StatusFlags) (*RangeDownloadInfo, error) {
 	chunkSize := int64(maxChunkSize)
 	if totalSize < minChunkSize {
 		chunkSize = totalSize
-	}
-
-	tr := http.Transport{
-		MaxIdleConnsPerHost: workerLimit,
-		MaxConnsPerHost:     0,
-		DisableKeepAlives:   false,
-		IdleConnTimeout:     10 * time.Second,
-		ForceAttemptHTTP2:   false,
-		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		ReadBufferSize:      bufferSize,
-		WriteBufferSize:     bufferSize,
-	}
-	client := &http.Client{
-		Transport: &tr,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("Too many redirects")
-			}
-			// A small safeguard to make sure the correct range headers are copied over through the redirections
-			req.Header.Set("Range", via[0].Header.Get("Range"))
-			return nil
-		},
 	}
 
 	var dirName string
@@ -151,8 +129,10 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 	workerSlice := make([]*WorkerInfo, workerLimit)
 	for i := range workerSlice {
 		workerInfo := &WorkerInfo{
-			ID:     i,
-			Status: WorkerStatusIdle,
+			ID:                i,
+			Status:            WorkerStatusIdle,
+			HttpClient:        newWorkerClient(),
+			RestartWorkerChan: make(chan struct{}, 1),
 		}
 		workerSlice[i] = workerInfo
 	}
@@ -174,20 +154,20 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 	}
 
 	rdi := &RangeDownloadInfo{
-		ChunkChan:    make(chan int),
-		Client:       client,
-		WriterPool:   pool,
-		Wg:           &wg,
-		Workers:      workers,
-		ChunkSize:    chunkSize,
-		TotalChunks:  int64(math.Ceil(float64(totalSize) / float64(chunkSize))),
-		TotalSize:    totalSize,
-		BytesWritten: &bytesWritten,
-		ReqURL:       reqURl,
-		Filename:     filename,
-		DirName:      dirName,
-		File:         file,
-		StatusFlags:  statusFlags,
+		ChunkChan:           make(chan int),
+		WriterPool:          pool,
+		Wg:                  &wg,
+		Workers:             workers,
+		ChunkSize:           chunkSize,
+		TotalChunks:         int64(math.Ceil(float64(totalSize) / float64(chunkSize))),
+		TotalSize:           totalSize,
+		BytesWritten:        &bytesWritten,
+		ReqURL:              reqURl,
+		Filename:            filename,
+		DirName:             dirName,
+		File:                file,
+		StatusFlags:         statusFlags,
+		WorkerBaselineSpeed: 0,
 	}
 
 	return rdi, nil
@@ -227,6 +207,7 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 
 func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onError ErrorFunc) {
 	workerInfo.StartedAt = time.Now()
+	workerInfo.RestartedAt = time.Now()
 	defer rdi.Wg.Done()
 
 	var logger *log.Logger
@@ -238,6 +219,21 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 	}
 
 	for chunkIndex := range rdi.ChunkChan {
+		// check for a restart signal from health monitor
+		select {
+		case <-workerInfo.RestartWorkerChan:
+			workerInfo.HttpClient = newWorkerClient()
+			if rdi.StatusFlags.EnableTrace {
+				logger.Printf("[Worker %2d::Chunk %4d] RESTARTED | Worker Speed was: %s | Workers Baseline Speed: %s",
+					workerInfo.ID,
+					workerInfo.Chunk.Index,
+					utils.FormatSpeedString(workerInfo.Speed, "B/s"),
+					utils.FormatSpeedString(rdi.WorkerBaselineSpeed, "B/s"))
+			}
+		default:
+		}
+
+		// if no signal from health monitor continue with downloading the chunk
 		workerInfo.Status = WorkerStatusIdle
 		startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
 		endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
@@ -265,9 +261,9 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 				trace := &httptrace.ClientTrace{
 					GotConn: func(connInfo httptrace.GotConnInfo) {
 						if connInfo.Reused {
-							logger.Printf("[Worker %d::Chunk %d] Connection Reused | IdleTime: %v", workerInfo.ID, workerInfo.Chunk.Index, connInfo.IdleTime)
+							logger.Printf("[Worker %2d::Chunk %4d] Connection Reused | IdleTime: %v", workerInfo.ID, workerInfo.Chunk.Index, connInfo.IdleTime)
 						} else {
-							logger.Printf("[Worker %d::Chunk %d] NEW Connection Dialed | Addr: %v", workerInfo.ID, workerInfo.Chunk.Index, connInfo.Conn.RemoteAddr())
+							logger.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Addr: %v", workerInfo.ID, workerInfo.Chunk.Index, connInfo.Conn.RemoteAddr())
 						}
 					},
 					WroteRequest: func(info httptrace.WroteRequestInfo) {
@@ -280,7 +276,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 				req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 			}
 
-			resp, doErr = rdi.Client.Do(req)
+			resp, doErr = workerInfo.HttpClient.Do(req)
 			if doErr == nil && resp.StatusCode == http.StatusPartialContent {
 				success = true
 				break
@@ -293,7 +289,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 
 			workerInfo.Status = WorkerStatusRetrying
 
-			// implement exponential backoff
+			// TODO: implement exponential backoff
 			time.Sleep(time.Second * 1)
 		}
 
