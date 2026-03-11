@@ -3,23 +3,57 @@ A brutally fast, highly concurrent, multi-worker file downloader built in Go
 
 ---
 ### Build & Run
+
+**Prerequisites:** Go 1.26.1, Make
+
+Clone the repo:
 ```bash
 git clone "https://github.com/notblankz/downpour.git"
 cd downpour/
-go build -o downpour.exe
-
-# Normal Download
-.\downpour.exe "https://ash-speed.hetzner.com/1GB.bin"
-
-# Enable Telemetry (Generates a CSV with telemetry data like speed/progress)
-.\downpour.exe -tel "https://sin-speed.hetzner.com/1GB.bin"
-
-# Generate HTTP Trace Logs (For deep network debugging):
-.\downpour.exe -hl "https://example.com/file.zip"
-
-# Show Help:
-.\downpour.exe -h
 ```
+
+Build for your platform:
+
+**Linux / macOS**
+```bash
+make linux-amd64    # Linux x86_64
+make linux-arm64    # Linux ARM64
+make darwin-amd64   # macOS Intel
+make darwin-arm64   # macOS Apple Silicon
+```
+
+**Windows (via WSL or Git Bash)**
+```bash
+make windows-amd64  # Windows x86_64
+make windows-arm64  # Windows ARM64
+```
+
+Or build all platforms at once:
+```bash
+make all
+```
+
+Binaries are output to the `builds/` directory.
+
+---
+
+**Usage:**
+```bash
+# Normal Download
+./builds/downpour-linux-amd64 "https://ash-speed.hetzner.com/1GB.bin"
+
+# Enable Telemetry
+./builds/downpour-linux-amd64 -tel "https://sin-speed.hetzner.com/1GB.bin"
+
+# Generate HTTP Trace Logs
+./builds/downpour-linux-amd64 -hl "https://example.com/file.zip"
+
+# Show Help
+./builds/downpour-linux-amd64 -h
+```
+
+> On Windows use `.\builds\downpour-windows-amd64.exe` instead.
+
 ---
 
 ### Current Status
