@@ -94,6 +94,7 @@ func main() {
 	rdi, initErr := downloader.InitRangeDownloadInfo(filename, totalSize, urlString, statusFlags)
 	if initErr != nil {
 		startErrorUI(initErr)
+		return
 	}
 	m := ui.InitialModel(filename, totalSize, acceptRangeBool, rdi)
 	p := tea.NewProgram(m)
@@ -167,12 +168,7 @@ func main() {
 }
 
 // <== Helper Functions ==>
-// FIX
 func startErrorUI(err error) {
-	m := ui.InitialModel("Unknown", 0, false, nil)
-	p := tea.NewProgram(m)
-	if _, err := p.Run(); err != nil {
-		os.Exit(1)
-	}
-	p.Send(ui.ErrorMsg{Err: err})
+	fmt.Fprintf(os.Stderr, "\nFatal Error: %v\n", err)
+	os.Exit(1)
 }

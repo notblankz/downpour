@@ -53,6 +53,10 @@ const asciiLogo = `
 
 func InitialModel(filename string, total int64, acceptRange bool, rdi *downloader.RangeDownloadInfo) Model {
 	p := progress.New(progress.WithDefaultGradient())
+	workerCount := 0
+	if rdi != nil {
+		workerCount = rdi.Workers.Limit
+	}
 	return Model{
 		filename:     filename,
 		totalSize:    total,
@@ -61,7 +65,7 @@ func InitialModel(filename string, total int64, acceptRange bool, rdi *downloade
 		downloaded:   0,
 		progress:     p,
 		status:       "downloading",
-		workerSpeeds: make([]float64, rdi.Workers.Limit),
+		workerSpeeds: make([]float64, workerCount),
 		err:          nil,
 		startTime:    time.Now(),
 	}
@@ -133,6 +137,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	if m.status == "error" {
 		return fmt.Sprintf("\nFatal Error: %v\n\n  Press 'q' to quit", m.err)
+	} else if m.rdi == nil {
+		return "\nFatal Error: RangeDownloadInfo is nil\n\n  Press 'q' to quit"
 	}
 
 	if m.status == "done" {
