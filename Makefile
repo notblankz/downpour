@@ -1,7 +1,8 @@
 APP_NAME = downpour
 CMD_PATH = .
 OUT_DIR = builds
-LDFLAGS = -ldflags="-s -w" -trimpath
+LDFLAGS = -ldflags="-s -w -X main.version=$(VERSION)" -trimpath
+VERSION = v0.1.0
 
 .PHONY: all clean
 

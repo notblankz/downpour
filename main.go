@@ -16,8 +16,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+var version = "dev"
+
 func main() {
-	var helpFlag, httpLogFlag, telemetryFlag bool
+	var helpFlag, httpLogFlag, telemetryFlag, versionFlag bool
 	var expectedHash, algorithm string
 
 	flag.BoolVar(&helpFlag, "help", false, "Show help message")
@@ -35,10 +37,18 @@ func main() {
 	flag.StringVar(&algorithm, "algorithm", "", "Cryptographic algorithm")
 	flag.StringVar(&algorithm, "a", "", "Cryptographic algorithm (shorthand)")
 
+	flag.BoolVar(&versionFlag, "version", false, "Print version")
+	flag.BoolVar(&versionFlag, "v", false, "Print version (shorthand)")
+
 	flag.Parse()
 
 	if helpFlag {
 		ui.PrintHelp()
+		return
+	}
+
+	if versionFlag {
+		fmt.Println("downpour", version)
 		return
 	}
 

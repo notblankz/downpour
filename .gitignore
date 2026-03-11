@@ -39,3 +39,6 @@ go.work.sum
 
 # test files
 test/
+
+# builds folder
+builds/
