@@ -25,6 +25,7 @@ const (
 	WorkerStatusDownloading WorkerStatus = "downloading"
 	WorkerStatusRetrying    WorkerStatus = "retrying"
 	WorkerStatusDone        WorkerStatus = "done"
+	WorkerStatusRestarting  WorkerStatus = "restarting"
 )
 
 type WorkerInfo struct {
