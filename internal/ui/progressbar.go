@@ -203,7 +203,16 @@ func (m Model) View() string {
 }
 
 func (m Model) formatWorker(workerInfo *downloader.WorkerInfo) string {
-	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, utils.FormatSpeedString(workerInfo.Speed, "B/s"), fmt.Sprintf("#%d", workerInfo.Chunk.Index))
+	var speedStr string
+	switch workerInfo.Status {
+	case downloader.WorkerStatusDone:
+		speedStr = "IDLE"
+	case downloader.WorkerStatusRestarting:
+		speedStr = "RESTARTING"
+	default:
+		speedStr = utils.FormatSpeedString(workerInfo.Speed, "B/s")
+	}
+	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, speedStr, fmt.Sprintf("#%d", workerInfo.Chunk.Index))
 }
 
 func (m Model) formatWorkerGrid(rdi *downloader.RangeDownloadInfo) string {

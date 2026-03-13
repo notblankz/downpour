@@ -47,7 +47,6 @@ func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
 			// worker details
 			var workersSpeed strings.Builder
 			for _, workerInfo := range rdi.Workers.Slice {
-				workerInfo.UpdateSpeed()
 				fmt.Fprintf(&workersSpeed, "%.0f,", workerInfo.Speed)
 			}
 			fmt.Fprintf(f, "%.0f,%d,%.0f,%s\n", elapsed, currentTotal, float64(delta), workersSpeed.String())
