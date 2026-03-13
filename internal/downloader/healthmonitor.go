@@ -61,6 +61,7 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 			if rdi.BytesWritten.Load() <= int64(0.98*float64(rdi.TotalSize)) {
 				for _, wi := range rdi.Workers.Slice {
 					if wi.Status != WorkerStatusDone && wi.Speed < (0.3*rdi.WorkerBaselineSpeed) && (time.Since(wi.RestartedAt) > 5*time.Second) {
+						wi.Status = WorkerStatusRestarting
 						signalRestart(wi.RestartWorkerChan)
 						wi.RestartedAt = time.Now()
 					}

@@ -204,9 +204,12 @@ func (m Model) View() string {
 
 func (m Model) formatWorker(workerInfo *downloader.WorkerInfo) string {
 	var speedStr string
-	if workerInfo.Status == downloader.WorkerStatusDone {
+	switch workerInfo.Status {
+	case downloader.WorkerStatusDone:
 		speedStr = "IDLE"
-	} else {
+	case downloader.WorkerStatusRestarting:
+		speedStr = "RESTARTING"
+	default:
 		speedStr = utils.FormatSpeedString(workerInfo.Speed, "B/s")
 	}
 	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, speedStr, fmt.Sprintf("#%d", workerInfo.Chunk.Index))
