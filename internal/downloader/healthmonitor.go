@@ -13,10 +13,23 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 	for {
 		select {
 		case <-ticker.C:
+
 			// copy current worker speeds
-			workerSpeeds := make([]float64, rdi.Workers.Limit)
-			for i, wi := range rdi.Workers.Slice {
-				workerSpeeds[i] = wi.Speed
+			var workerSpeeds []float64
+			var activeWorkers []*WorkerInfo
+			var idleWorkers []*WorkerInfo
+			for _, wi := range rdi.Workers.Slice {
+				wi.UpdateSpeed()
+				if wi.Status == WorkerStatusDone {
+					idleWorkers = append(idleWorkers, wi)
+				} else {
+					activeWorkers = append(activeWorkers, wi)
+					workerSpeeds = append(workerSpeeds, wi.Speed)
+				}
+			}
+
+			if len(workerSpeeds) == 0 {
+				continue
 			}
 
 			sort.Slice(workerSpeeds, func(i, j int) bool {
@@ -47,7 +60,7 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 			// find and restart workers that are slower and have not been recently restarted
 			if rdi.BytesWritten.Load() <= int64(0.98*float64(rdi.TotalSize)) {
 				for _, wi := range rdi.Workers.Slice {
-					if wi.Speed < (0.3*rdi.WorkerBaselineSpeed) && (time.Since(wi.RestartedAt) > 5*time.Second) {
+					if wi.Status != WorkerStatusDone && wi.Speed < (0.3*rdi.WorkerBaselineSpeed) && (time.Since(wi.RestartedAt) > 5*time.Second) {
 						signalRestart(wi.RestartWorkerChan)
 						wi.RestartedAt = time.Now()
 					}
