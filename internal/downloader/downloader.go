@@ -3,12 +3,10 @@ package downloader
 import (
 	"downpour/internal/utils"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"mime"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -234,86 +232,13 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 		}
 
 		// if no signal from health monitor continue with downloading the chunk
-		workerInfo.Status = WorkerStatusIdle
-		startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
-		endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
-
-		// Add information to the WorkerInfo
-		workerInfo.Chunk.Index = int64(chunkIndex)
-		workerInfo.Chunk.Size = endPos - startPos
-		workerInfo.Chunk.BytesDownloaded = 0
-
-		const maxRetries = 5
-		var resp *http.Response
-		var doErr error
-		var success bool
-
-		for range maxRetries {
-			workerInfo.Status = WorkerStatusRequesting
-			req, err := http.NewRequest("GET", rdi.ReqURL, nil)
-			if err != nil {
-				onError(err)
-				break
-			}
-			req.Header.Add("Range", fmt.Sprintf("bytes=%v-%v", startPos, endPos))
-
-			if rdi.StatusFlags.EnableTrace {
-				trace := &httptrace.ClientTrace{
-					GotConn: func(connInfo httptrace.GotConnInfo) {
-						if connInfo.Reused {
-							logger.Printf("[Worker %2d::Chunk %4d] Connection Reused | IdleTime: %v", workerInfo.ID, workerInfo.Chunk.Index, connInfo.IdleTime)
-						} else {
-							logger.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Addr: %v", workerInfo.ID, workerInfo.Chunk.Index, connInfo.Conn.RemoteAddr())
-						}
-					},
-					WroteRequest: func(info httptrace.WroteRequestInfo) {
-						if info.Err != nil {
-							logger.Printf("[Worker %d::Chunk %d] Write Error: %v", workerInfo.ID, workerInfo.Chunk.Index, info.Err)
-						}
-					},
-				}
-
-				req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-			}
-
-			resp, doErr = workerInfo.HttpClient.Do(req)
-			if doErr == nil && resp.StatusCode == http.StatusPartialContent {
-				success = true
-				break
-			}
-
-			// close the response body if we received some other Reponse apart from StatusPartialContent
-			if resp != nil {
-				resp.Body.Close()
-			}
-
-			workerInfo.Status = WorkerStatusRetrying
-
-			// TODO: implement exponential backoff
-			time.Sleep(time.Second * 1)
+		err := workerInfo.downloadChunk(chunkIndex, rdi, logger)
+		if err != nil {
+			onError(err)
 		}
-
-		if !success {
-			onError(fmt.Errorf("FATAL: worker %d failed on chunk %d after %d retries. Last error: %v", workerInfo.ID, workerInfo.Chunk.Index, maxRetries, doErr))
-			continue
-		}
-
-		// write to file
-		workerInfo.Status = WorkerStatusDownloading
-		cw := rdi.WriterPool.Get().(*chunkWriter)
-		cw.worker = workerInfo
-		cw.offset = startPos
-		_, copyErr := io.CopyBuffer(cw, resp.Body, cw.buf)
-		if copyErr != nil {
-			resp.Body.Close()
-			rdi.WriterPool.Put(cw)
-			onError(copyErr)
-			continue
-		}
-		rdi.WriterPool.Put(cw)
-		resp.Body.Close()
-		workerInfo.Status = WorkerStatusIdle
 	}
+
+	workerInfo.Status = WorkerStatusDone
 }
 
 // <== Helper Functions ==>
