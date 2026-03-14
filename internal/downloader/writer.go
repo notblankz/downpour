@@ -25,6 +25,7 @@ type chunkWriter struct {
 	worker             *WorkerInfo
 	file               *os.File
 	offset             int64
+	chunkEndOffset     int64
 	globalBytesWritten *atomic.Int64
 }
 
@@ -36,7 +37,16 @@ func (cw *chunkWriter) Write(p []byte) (int, error) {
 	cw.offset += int64(nwrite)
 	cw.worker.Chunk.BytesDownloaded += int64(nwrite)
 	cw.worker.TotalBytesWritten += int64(nwrite)
-	cw.globalBytesWritten.Add(int64(nwrite))
+	updatedOffset := cw.offset
+	oldSharedOffset := cw.worker.Chunk.SharedWriteOffset.Load()
+	if updatedOffset > oldSharedOffset {
+		if cw.worker.Chunk.SharedWriteOffset.CompareAndSwap(oldSharedOffset, updatedOffset) {
+			newBytes := updatedOffset - oldSharedOffset
+			cw.globalBytesWritten.Add(newBytes)
+		}
+	} else if oldSharedOffset >= cw.chunkEndOffset {
+		cw.worker.Chunk.Cancel()
+	}
 	return nwrite, nil
 }
 

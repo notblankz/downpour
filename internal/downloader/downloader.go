@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"context"
 	"downpour/internal/utils"
 	"fmt"
 	"log"
@@ -22,9 +23,9 @@ type DoneFunc func()
 type ErrorFunc func(err error)
 type VerifyFunc func()
 
-const bufferSize = 64 * 1024         // 64KB
-const minChunkSize = 256 * 1024      // 256KB
-const maxChunkSize = 2 * 1024 * 1024 // 2MB
+const bufferSize = 64 * 1024          // 64KB
+const minChunkSize = 256 * 1024       // 256KB
+const maxChunkSize = 16 * 1024 * 1024 // 2MB
 const workerLimit = 32
 
 func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
@@ -79,6 +80,8 @@ type RangeDownloadInfo struct {
 	ChunkChan           chan int
 	WriterPool          *sync.Pool
 	Wg                  *sync.WaitGroup
+	HedgeWg             *sync.WaitGroup
+	HedgeDone           chan struct{}
 	Workers             Workers
 	TotalChunks         int64
 	ChunkSize           int64
@@ -122,15 +125,18 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 
 	// create a WaitGroup and a Atomic Int64 Variable
 	var wg sync.WaitGroup
+	var hedgeWg sync.WaitGroup
 	var bytesWritten atomic.Int64
 
 	workerSlice := make([]*WorkerInfo, workerLimit)
 	for i := range workerSlice {
 		workerInfo := &WorkerInfo{
 			ID:                i,
+			Chunk:             &ChunkInfo{},
 			Status:            WorkerStatusIdle,
 			HttpClient:        newWorkerClient(),
 			RestartWorkerChan: make(chan struct{}, 1),
+			HedgeChan:         make(chan HedgeChunk, 1),
 		}
 		workerSlice[i] = workerInfo
 	}
@@ -155,6 +161,8 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 		ChunkChan:           make(chan int),
 		WriterPool:          pool,
 		Wg:                  &wg,
+		HedgeWg:             &hedgeWg,
+		HedgeDone:           make(chan struct{}),
 		Workers:             workers,
 		ChunkSize:           chunkSize,
 		TotalChunks:         int64(math.Ceil(float64(totalSize) / float64(chunkSize))),
@@ -189,6 +197,9 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 		close(rdi.ChunkChan)
 	}()
 	rdi.Wg.Wait()
+	// wait for all hedge workers to complete & then send a close signal to them for them to return
+	rdi.HedgeWg.Wait()
+	close(rdi.HedgeDone)
 	rdi.File.Close()
 
 	if rdi.Checksum != nil {
@@ -206,10 +217,13 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onError ErrorFunc) {
 	workerInfo.StartedAt = time.Now()
 	workerInfo.RestartedAt = time.Now()
-	defer rdi.Wg.Done()
 
 	var logger *log.Logger
 	var logFile *os.File
+
+	ctx, cancelWorker := context.WithCancel(context.Background())
+	workerInfo.KillWorker = cancelWorker
+	workerInfo.WorkerCtx = ctx
 
 	if rdi.StatusFlags.EnableTrace {
 		logger, logFile = rdi.getTraceLogger()
@@ -220,6 +234,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 		// check for a restart signal from health monitor
 		select {
 		case <-workerInfo.RestartWorkerChan:
+			workerInfo.Status = WorkerStatusRestarting
 			workerInfo.HttpClient = newWorkerClient()
 			if rdi.StatusFlags.EnableTrace {
 				logger.Printf("[Worker %2d::Chunk %4d] RESTARTED | Worker Speed was: %s | Workers Baseline Speed: %s",
@@ -228,6 +243,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 					utils.FormatSpeedString(workerInfo.Speed, "B/s"),
 					utils.FormatSpeedString(rdi.WorkerBaselineSpeed, "B/s"))
 			}
+			workerInfo.Status = WorkerStatusIdle
 		default:
 		}
 
@@ -238,7 +254,25 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onErro
 		}
 	}
 
+	// completed downloading all the normal chunks assigned to it
 	workerInfo.Status = WorkerStatusDone
+	rdi.Wg.Done()
+
+	// start listening for any Hedge Work coming in
+	for {
+		select {
+		case hc := <-workerInfo.HedgeChan:
+			workerInfo.Chunk.SharedWriteOffset = hc.SharedWriteOffset
+			workerInfo.Chunk.Hedged.CompareAndSwap(false, true)
+			err := workerInfo.downloadChunk(int(hc.ChunkIndex), rdi, logger)
+			rdi.HedgeWg.Done()
+			if err != nil {
+				onError(err)
+			}
+		case <-rdi.HedgeDone:
+			return
+		}
+	}
 }
 
 // <== Helper Functions ==>
