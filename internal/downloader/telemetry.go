@@ -54,10 +54,48 @@ func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
 	}
 }
 
-func (rdi *RangeDownloadInfo) getTraceLogger() (*log.Logger, *os.File) {
-	f, err := os.OpenFile(filepath.Join(rdi.DirName, "httptrace.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		panic(err)
+type Logger struct {
+	HttpTrace *log.Logger
+	Hedging   *log.Logger
+	Restarts  *log.Logger
+	Writes    *log.Logger
+}
+
+func (rdi *RangeDownloadInfo) getLoggers() (*Logger, []*os.File, error) {
+	openLog := func(name string) (*log.Logger, *os.File, error) {
+		f, err := os.OpenFile(filepath.Join(rdi.DirName, name), os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return nil, nil, err
+		}
+		return log.New(f, "", log.LstdFlags|log.Lmicroseconds), f, nil
 	}
-	return log.New(f, "", log.LstdFlags|log.Lmicroseconds), f
+
+	var files []*os.File
+	logger := &Logger{}
+
+	l, f, err := openLog("httptrace.log")
+	if err != nil {
+		return nil, nil, err
+	}
+	logger.HttpTrace, files = l, append(files, f)
+
+	l, f, err = openLog("hedging.log")
+	if err != nil {
+		return nil, nil, err
+	}
+	logger.Hedging, files = l, append(files, f)
+
+	l, f, err = openLog("restarts.log")
+	if err != nil {
+		return nil, nil, err
+	}
+	logger.Restarts, files = l, append(files, f)
+
+	l, f, err = openLog("chunks.log")
+	if err != nil {
+		return nil, nil, err
+	}
+	logger.Writes, files = l, append(files, f)
+
+	return logger, files, nil
 }

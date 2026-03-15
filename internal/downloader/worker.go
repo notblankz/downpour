@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
-	"math"
 	"net/http"
 	"net/http/httptrace"
 	"sync/atomic"
@@ -71,10 +69,8 @@ func (info *WorkerInfo) UpdateSpeed() float64 {
 	return curSpeed
 }
 
-func (workerInfo *WorkerInfo) downloadChunk(chunkIndex int, rdi *RangeDownloadInfo, logger *log.Logger) error {
+func (workerInfo *WorkerInfo) downloadChunk(chunkIndex int64, startPos int64, endPos int64, rdi *RangeDownloadInfo) error {
 	workerInfo.Status = WorkerStatusIdle
-	startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
-	endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
 
 	// Add information to the WorkerInfo
 	workerInfo.Chunk.Index = int64(chunkIndex)
@@ -108,14 +104,14 @@ func (workerInfo *WorkerInfo) downloadChunk(chunkIndex int, rdi *RangeDownloadIn
 			trace := &httptrace.ClientTrace{
 				GotConn: func(connInfo httptrace.GotConnInfo) {
 					if connInfo.Reused {
-						logger.Printf("[Worker %2d::Chunk %4d] Connection Reused | Hedged Chunk: %v | IdleTime: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), connInfo.IdleTime)
+						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] Connection Reused | Hedged Chunk: %v | IdleTime: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), connInfo.IdleTime)
 					} else {
-						logger.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Hedged Chunk: %v | Addr: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), connInfo.Conn.RemoteAddr())
+						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Hedged Chunk: %v | Addr: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), connInfo.Conn.RemoteAddr())
 					}
 				},
 				WroteRequest: func(info httptrace.WroteRequestInfo) {
 					if info.Err != nil {
-						logger.Printf("[Worker %d::Chunk %d] Hedged Chunk: %v | Write Error: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), info.Err)
+						rdi.Logger.HttpTrace.Printf("[Worker %d::Chunk %d] Hedged Chunk: %v | Write Error: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), info.Err)
 					}
 				},
 			}
@@ -143,7 +139,7 @@ func (workerInfo *WorkerInfo) downloadChunk(chunkIndex int, rdi *RangeDownloadIn
 	if !success {
 		if errors.Is(doErr, context.Canceled) {
 			if rdi.StatusFlags.EnableTrace {
-				logger.Printf("[Worker %2d::Chunk %4d] CANCELLED | Chunk was hedged by another worker", workerInfo.ID, workerInfo.Chunk.Index)
+				rdi.Logger.Hedging.Printf("[Worker %2d::Chunk %4d] CANCELLED | Chunk was hedged by another worker", workerInfo.ID, workerInfo.Chunk.Index)
 			}
 			return nil
 		}
