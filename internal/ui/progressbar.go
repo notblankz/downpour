@@ -150,11 +150,12 @@ func (m Model) View() string {
 		}
 
 		return fmt.Sprintf(
-			"%s\nDownload Complete!\n\n    Filename: %s\n    Downloaded: %s (Filesize: %s)\n    Time: %.2fs\n    Average Speed: %s\n\n  Press 'q' to exit",
+			"%s\nDownload Complete!\n\n    Filename: %s\n    Downloaded: %s (Filesize: %s)\n    Time: %s (%.2fs)\n    Average Speed: %s\n\n  Press 'q' to exit",
 			asciiLogo,
 			filenameDisplay,
 			utils.FormatSpeedString(float64(m.rdi.BytesWritten.Load()), "B"),
 			utils.FormatSpeedString(float64(m.rdi.TotalSize), "B"),
+			utils.FormatDuration(m.elapsed),
 			m.elapsed.Seconds(),
 			utils.FormatSpeedString(avgSpeed, "B/s"),
 		)
@@ -178,7 +179,7 @@ func (m Model) View() string {
 	if m.currentSpeed > 0 && m.totalSize > 0 {
 		remaining := float64(m.totalSize - m.downloaded)
 		seconds := remaining / m.currentSpeed
-		etdStr = fmt.Sprintf("ETA: %s", (time.Duration(seconds) * time.Second).Round(time.Second))
+		etdStr = fmt.Sprintf("ETA: %s", utils.FormatDuration((time.Duration(seconds) * time.Second).Round(time.Second)))
 	} else {
 		etdStr = "ETA: Calculating..."
 	}
