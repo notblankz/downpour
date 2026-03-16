@@ -21,47 +21,36 @@ import (
 // struct to implement io.Writer for custom use of WriteAt() instead of Write() in io.Copy()
 
 type chunkWriter struct {
-	buf                []byte
-	worker             *WorkerInfo
-	curTask            *ChunkTask
-	file               *os.File
-	localWriteHead     int64
+	buf     []byte
+	worker  *WorkerInfo
+	curTask *ChunkTask
+	file    *os.File
+
+	reservedStart int64
+	reservedEnd   int64
+	writeCursor   int64
+
 	globalBytesWritten *atomic.Int64
 }
 
 func (cw *chunkWriter) Write(p []byte) (int, error) {
-	nwrite, err := cw.file.WriteAt(p, int64(cw.localWriteHead))
+	// Enforce range checking - this will also help us later with hedging chunk writing
+	if (cw.writeCursor + int64(len(p))) > (cw.reservedEnd - cw.reservedStart) {
+		return 0, fmt.Errorf("Fatal: write range provided might exceed reserved range - [%d, %d]",
+			cw.reservedStart, cw.reservedEnd,
+		)
+	}
+
+	fileOffest := cw.reservedStart + cw.writeCursor
+	nwrite, err := cw.file.WriteAt(p, fileOffest)
 	if err != nil {
-		return nwrite, fmt.Errorf("Could not write to file at offset %d - %v", cw.localWriteHead, err)
+		return nwrite, fmt.Errorf("Could not write to file at offset %d - %v", fileOffest, err)
 	}
 
-	cw.localWriteHead += int64(nwrite)
+	cw.writeCursor += int64(nwrite)
 	cw.worker.TotalBytesWritten += int64(nwrite)
+	cw.globalBytesWritten.Add(int64(nwrite))
 
-	// update this chunk writer's write head to check if this chunk writer with it's worker actually did some work
-	updatedLocalWriteHead := cw.localWriteHead
-
-	// Hardening of CAS instead of using One-Shot CAS - Suggestion by GPT-5.3-Codex
-	// This loop is to make sure that we check there are no new bytes that need to be updated into globalBytesWritten
-	// Consider this scenario Worker A performs CAS(1000 -> 1500) then Worker B tries to perform CAS(1000 -> 1800) globalBytesWritten
-	// will only move forward 500 Bytes and ignore Worker B's remaining 300 Bytes
-	// with the loop since none of the if stmnts execute we loop back and now oldFrontier becomes 1500 and hence Worker B's remaining 300 Bytes is counted
-	for {
-		sharedTaskWriteHead := cw.curTask.WriteHead.Load()
-		if updatedLocalWriteHead <= sharedTaskWriteHead {
-			break
-		}
-		if cw.curTask.WriteHead.CompareAndSwap(sharedTaskWriteHead, updatedLocalWriteHead) {
-			cw.globalBytesWritten.Add(updatedLocalWriteHead - sharedTaskWriteHead)
-			break
-		}
-	}
-
-	// Check completition of Chunk
-	if cw.curTask.WriteHead.Load() >= cw.curTask.End {
-		cw.curTask.Done.Store(true)
-		cw.curTask.Cancel()
-	}
 	return nwrite, nil
 }
 

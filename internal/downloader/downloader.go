@@ -76,7 +76,8 @@ type Workers struct {
 	Slice []*WorkerInfo
 }
 type RangeDownloadInfo struct {
-	NormalQueue         chan *ChunkTask
+	NormalQueue chan *ChunkTask
+	// HedgeQueue          chan *HedgeTask
 	WriterPool          *sync.Pool
 	NormalWorkerWg      *sync.WaitGroup
 	HedgeWg             *sync.WaitGroup
@@ -139,7 +140,7 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 			Status:            WorkerStatusIdle,
 			HttpClient:        newWorkerClient(),
 			RestartWorkerChan: make(chan struct{}, 1),
-			HedgeChan:         make(chan HedgeChunk, 1),
+			// HedgeChan:         make(chan HedgeChunk, 1),
 		}
 		workerSlice[i] = worker
 	}
@@ -225,7 +226,7 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 				Cancel: cancelChunk,
 			}
 
-			ct.WriteHead.Store(startPos)
+			// ct.WriteHead.Store(startPos)
 			rdi.Chunks[chunkIndex] = ct
 
 			rdi.NormalQueue <- ct
@@ -278,7 +279,8 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 		}
 
 		// if no signal from health monitor continue with downloading the chunk
-		err := worker.downloadChunk(chunkTask, rdi)
+		mode := "normal" // this is for testing purposes
+		err := worker.downloadChunk(chunkTask, rdi, mode)
 		if err != nil {
 			onError(err)
 		}

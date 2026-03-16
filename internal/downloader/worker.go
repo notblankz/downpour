@@ -8,19 +8,18 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
-	"sync/atomic"
 	"time"
 )
 
-type ChunkInfo struct {
-	Index             int64
-	Size              int64
-	BytesDownloaded   int64
-	SharedWriteOffset *atomic.Int64
-	Hedged            atomic.Bool
-	Ctx               context.Context
-	Cancel            context.CancelFunc
-}
+// type ChunkInfo struct {
+// 	Index             int64
+// 	Size              int64
+// 	BytesDownloaded   int64
+// 	SharedWriteOffset *atomic.Int64
+// 	Hedged            atomic.Bool
+// 	Ctx               context.Context
+// 	Cancel            context.CancelFunc
+// }
 
 type WorkerStatus string
 
@@ -33,10 +32,6 @@ const (
 	WorkerStatusRestarting  WorkerStatus = "restarting"
 )
 
-type HedgeChunk struct {
-	ChunkIndex        int64
-	SharedWriteOffset *atomic.Int64
-}
 type WorkerInfo struct {
 	ID         int
 	WorkerCtx  context.Context
@@ -51,21 +46,8 @@ type WorkerInfo struct {
 	StartedAt         time.Time
 	RestartedAt       time.Time
 	RestartWorkerChan chan struct{}
-	HedgeChan         chan HedgeChunk
 	HttpClient        *http.Client
-}
-
-type ChunkTask struct {
-	Index int64
-	Start int64
-	End   int64 // End Exclusive
-
-	WriteHead atomic.Int64 // Next Unwritten Byte
-	Hedged    atomic.Bool
-	Done      atomic.Bool
-
-	Ctx    context.Context
-	Cancel context.CancelFunc
+	// HedgeChan         chan HedgeChunk
 }
 
 func (info *WorkerInfo) UpdateSpeed() float64 {
@@ -83,7 +65,7 @@ func (info *WorkerInfo) UpdateSpeed() float64 {
 	return curSpeed
 }
 
-func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo) error {
+func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo, mode string) error {
 	workerInfo.Status = WorkerStatusIdle
 
 	// Bind this worker to the current task
@@ -98,13 +80,22 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	var doErr error
 	var success bool
 
+	var rangeStart, rangeEnd int64
+
+	if mode == "normal" {
+		rangeStart = currentTask.Start
+		rangeEnd = currentTask.End
+	} else {
+		// hedged code comes here
+	}
+
 	for range maxRetries {
 		workerInfo.Status = WorkerStatusRequesting
 		req, err := http.NewRequestWithContext(currentTask.Ctx, "GET", rdi.ReqURL, nil)
 		if err != nil {
 			return err
 		}
-		req.Header.Add("Range", fmt.Sprintf("bytes=%v-%v", currentTask.Start, (currentTask.End-1)))
+		req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", rangeStart, rangeEnd-1))
 
 		if rdi.StatusFlags.EnableTrace {
 			trace := &httptrace.ClientTrace{
@@ -154,19 +145,35 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 
 	// write to file
 	workerInfo.Status = WorkerStatusDownloading
+
 	cw := rdi.WriterPool.Get().(*chunkWriter)
 	cw.worker = workerInfo
 	cw.curTask = currentTask
-	cw.localWriteHead = currentTask.Start
+	cw.reservedStart = rangeStart
+	cw.reservedEnd = rangeEnd
+	cw.writeCursor = 0
+
 	_, copyErr := io.CopyBuffer(cw, resp.Body, cw.buf)
 	resp.Body.Close()
 	rdi.WriterPool.Put(cw)
-	if copyErr != nil {
+
+	if copyErr == nil {
+		bytesWritten := cw.writeCursor
+
+		currentTask.CommittedBytes.Add(bytesWritten)
+
+		chunkSize := currentTask.End - currentTask.Start
+		if currentTask.CommittedBytes.Load() >= chunkSize {
+			if currentTask.Done.CompareAndSwap(false, true) {
+				currentTask.Cancel()
+			}
+		}
+	} else {
 		if errors.Is(copyErr, context.Canceled) {
 			return nil
 		}
-		return copyErr
 	}
+
 	workerInfo.Status = WorkerStatusIdle
 
 	return nil
