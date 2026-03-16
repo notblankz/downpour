@@ -28,49 +28,50 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 				}
 			}
 
+			// HEDGE WORKING COMMENTED OUT TILL Normal Queue works with ChunkTask
 			// hedge work if below condition is met
-			if len(idleWorkers) > 0 {
-				// find the worst ACTIVE workers
-				sort.Slice(activeWorkers, func(i, j int) bool {
-					return activeWorkers[i].Speed < activeWorkers[j].Speed
-				})
+			// if len(idleWorkers) > 0 {
+			// 	// find the worst ACTIVE workers
+			// 	sort.Slice(activeWorkers, func(i, j int) bool {
+			// 		return activeWorkers[i].Speed < activeWorkers[j].Speed
+			// 	})
 
-				// find the best IDLE workers based on their Speed throughout the download
-				sort.Slice(idleWorkers, func(i, j int) bool {
-					return idleWorkers[i].Speed > idleWorkers[j].Speed
-				})
+			// 	// find the best IDLE workers based on their Speed throughout the download
+			// 	sort.Slice(idleWorkers, func(i, j int) bool {
+			// 		return idleWorkers[i].Speed > idleWorkers[j].Speed
+			// 	})
 
-				progress := float64(rdi.BytesWritten.Load()) / float64(rdi.TotalSize)
+			// 	progress := float64(rdi.BytesWritten.Load()) / float64(rdi.TotalSize)
 
-				var hedgeThreshold float64
-				switch {
-				case progress >= 0.90:
-					hedgeThreshold = 0.8 * rdi.WorkerBaselineSpeed
-				case progress >= 0.75:
-					hedgeThreshold = 0.5 * rdi.WorkerBaselineSpeed
-				default:
-					hedgeThreshold = 0.3 * rdi.WorkerBaselineSpeed
-				}
+			// 	var hedgeThreshold float64
+			// 	switch {
+			// 	case progress >= 0.90:
+			// 		hedgeThreshold = 0.8 * rdi.WorkerBaselineSpeed
+			// 	case progress >= 0.75:
+			// 		hedgeThreshold = 0.5 * rdi.WorkerBaselineSpeed
+			// 	default:
+			// 		hedgeThreshold = 0.3 * rdi.WorkerBaselineSpeed
+			// 	}
 
-				idleIndex := 0
-				for _, aw := range activeWorkers {
-					if aw.Chunk.Hedged.Load() {
-						continue
-					}
-					if aw.Speed >= hedgeThreshold {
-						continue
-					}
-					if idleIndex >= len(idleWorkers) {
-						break
-					}
-					rdi.HedgeWg.Add(1)
-					idleWorkers[idleIndex].HedgeChan <- HedgeChunk{
-						ChunkIndex:        aw.Chunk.Index,
-						SharedWriteOffset: aw.Chunk.SharedWriteOffset,
-					}
-					idleIndex++
-				}
-			}
+			// 	idleIndex := 0
+			// 	for _, aw := range activeWorkers {
+			// 		if aw.Chunk.Hedged.Load() {
+			// 			continue
+			// 		}
+			// 		if aw.Speed >= hedgeThreshold {
+			// 			continue
+			// 		}
+			// 		if idleIndex >= len(idleWorkers) {
+			// 			break
+			// 		}
+			// 		rdi.HedgeWg.Add(1)
+			// 		idleWorkers[idleIndex].HedgeChan <- HedgeChunk{
+			// 			ChunkIndex:        aw.Chunk.Index,
+			// 			SharedWriteOffset: aw.Chunk.SharedWriteOffset,
+			// 		}
+			// 		idleIndex++
+			// 	}
+			// }
 
 			if len(workerSpeeds) == 0 {
 				continue

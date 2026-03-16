@@ -23,29 +23,44 @@ import (
 type chunkWriter struct {
 	buf                []byte
 	worker             *WorkerInfo
+	curTask            *ChunkTask
 	file               *os.File
-	offset             int64
-	chunkEndOffset     int64
+	localWriteHead     int64
 	globalBytesWritten *atomic.Int64
 }
 
 func (cw *chunkWriter) Write(p []byte) (int, error) {
-	nwrite, err := cw.file.WriteAt(p, int64(cw.offset))
+	nwrite, err := cw.file.WriteAt(p, int64(cw.localWriteHead))
 	if err != nil {
-		return nwrite, fmt.Errorf("Could not write to file at offset %v - %v", cw.offset, err)
+		return nwrite, fmt.Errorf("Could not write to file at offset %d - %v", cw.localWriteHead, err)
 	}
-	cw.offset += int64(nwrite)
-	cw.worker.Chunk.BytesDownloaded += int64(nwrite)
+
+	cw.localWriteHead += int64(nwrite)
 	cw.worker.TotalBytesWritten += int64(nwrite)
-	updatedOffset := cw.offset
-	oldSharedOffset := cw.worker.Chunk.SharedWriteOffset.Load()
-	if updatedOffset > oldSharedOffset {
-		if cw.worker.Chunk.SharedWriteOffset.CompareAndSwap(oldSharedOffset, updatedOffset) {
-			newBytes := updatedOffset - oldSharedOffset
-			cw.globalBytesWritten.Add(newBytes)
+
+	// update this chunk writer's write head to check if this chunk writer with it's worker actually did some work
+	updatedLocalWriteHead := cw.localWriteHead
+
+	// Hardening of CAS instead of using One-Shot CAS - Suggestion by GPT-5.3-Codex
+	// This loop is to make sure that we check there are no new bytes that need to be updated into globalBytesWritten
+	// Consider this scenario Worker A performs CAS(1000 -> 1500) then Worker B tries to perform CAS(1000 -> 1800) globalBytesWritten
+	// will only move forward 500 Bytes and ignore Worker B's remaining 300 Bytes
+	// with the loop since none of the if stmnts execute we loop back and now oldFrontier becomes 1500 and hence Worker B's remaining 300 Bytes is counted
+	for {
+		sharedTaskWriteHead := cw.curTask.WriteHead.Load()
+		if updatedLocalWriteHead <= sharedTaskWriteHead {
+			break
 		}
-	} else if oldSharedOffset >= cw.chunkEndOffset {
-		cw.worker.Chunk.Cancel()
+		if cw.curTask.WriteHead.CompareAndSwap(sharedTaskWriteHead, updatedLocalWriteHead) {
+			cw.globalBytesWritten.Add(updatedLocalWriteHead - sharedTaskWriteHead)
+			break
+		}
+	}
+
+	// Check completition of Chunk
+	if cw.curTask.WriteHead.Load() >= cw.curTask.End {
+		cw.curTask.Done.Store(true)
+		cw.curTask.Cancel()
 	}
 	return nwrite, nil
 }
