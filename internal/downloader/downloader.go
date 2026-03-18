@@ -76,12 +76,11 @@ type Workers struct {
 	Slice []*WorkerInfo
 }
 type RangeDownloadInfo struct {
-	NormalQueue chan *ChunkTask
-	// HedgeQueue          chan *HedgeTask
+	NormalQueue         chan *ChunkTask
+	HedgeTicketQueue    chan *HedgeTicket
+	CurHedgePhase       HedgePhase
 	WriterPool          *sync.Pool
 	NormalWorkerWg      *sync.WaitGroup
-	HedgeWg             *sync.WaitGroup
-	HedgeDone           chan struct{}
 	Workers             Workers
 	TotalChunks         int64
 	Chunks              []*ChunkTask
@@ -129,7 +128,6 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 
 	// create a WaitGroup and a Atomic Int64 Variable
 	var wg sync.WaitGroup
-	var hedgeWg sync.WaitGroup
 	var bytesWritten atomic.Int64
 
 	workerSlice := make([]*WorkerInfo, workerLimit)
@@ -140,7 +138,6 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 			Status:            WorkerStatusIdle,
 			HttpClient:        newWorkerClient(),
 			RestartWorkerChan: make(chan struct{}, 1),
-			// HedgeChan:         make(chan HedgeChunk, 1),
 		}
 		workerSlice[i] = worker
 	}
@@ -165,8 +162,6 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 		NormalQueue:         make(chan *ChunkTask),
 		WriterPool:          pool,
 		NormalWorkerWg:      &wg,
-		HedgeWg:             &hedgeWg,
-		HedgeDone:           make(chan struct{}),
 		Workers:             workers,
 		ChunkSize:           chunkSize,
 		TotalChunks:         totalChunks,
@@ -221,12 +216,13 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 				// WriteHead: 	0
 				// Hedged: 		false
 				// Done: 		false
+				// ReservationHead: 0
+				// CommittedBytes: 0
 
 				Ctx:    chunkCtx,
 				Cancel: cancelChunk,
 			}
 
-			// ct.WriteHead.Store(startPos)
 			rdi.Chunks[chunkIndex] = ct
 
 			rdi.NormalQueue <- ct
@@ -234,10 +230,6 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 		close(rdi.NormalQueue)
 	}()
 	rdi.NormalWorkerWg.Wait()
-	// HEDGE WORKING COMMENTED OUT TILL Normal Queue works with ChunkTask
-	// wait for all hedge workers to complete & then send a close signal to them for them to return
-	// rdi.HedgeWg.Wait()
-	// close(rdi.HedgeDone)
 	rdi.File.Close()
 
 	if rdi.Checksum != nil {
@@ -260,7 +252,13 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 	worker.KillWorker = cancelWorker
 	worker.WorkerCtx = ctx
 
-	for chunkTask := range rdi.NormalQueue {
+	// gracefully exit worker once it completes downloading all the chunk tasks assigned to it
+	defer func() {
+		worker.Status = WorkerStatusDone
+		rdi.NormalWorkerWg.Done()
+	}()
+
+	for {
 
 		// check for a restart signal from health monitor
 		select {
@@ -268,9 +266,8 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 			worker.Status = WorkerStatusRestarting
 			worker.HttpClient = newWorkerClient()
 			if rdi.StatusFlags.EnableTrace {
-				rdi.Logger.Restarts.Printf("[Worker %2d::Chunk %4d] RESTARTED | Worker Speed was: %s | Workers Baseline Speed: %s",
+				rdi.Logger.Restarts.Printf("[Worker %2d] RESTARTED | Worker Speed was: %s | Workers Baseline Speed: %s",
 					worker.ID,
-					chunkTask.Index,
 					utils.FormatSpeedString(worker.Speed, "B/s"),
 					utils.FormatSpeedString(rdi.WorkerBaselineSpeed, "B/s"))
 			}
@@ -279,11 +276,21 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 		}
 
 		// if no signal from health monitor continue with downloading the chunk
-		mode := "normal" // this is for testing purposes
+		// ask for a chunk task from the scheduler
+		chunkTask, mode, ok := rdi.pickTaskForWorker(worker)
+		if !ok {
+			worker.KillWorker()
+			return
+		}
+		if chunkTask == nil {
+			continue
+		}
+
 		err := worker.downloadChunk(chunkTask, rdi, mode)
 		if err != nil {
 			onError(err)
 		}
+
 		rdi.Logger.Writes.Printf("[Worker %2d::Chunk %4d] WROTE CHUNK | Hedged Chunk: %v | Start: %d | End: %d",
 			worker.ID,
 			chunkTask.Index,
@@ -292,29 +299,6 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 			chunkTask.End-1,
 		)
 	}
-
-	// completed downloading all the normal chunks assigned to it
-	worker.Status = WorkerStatusDone
-	rdi.NormalWorkerWg.Done()
-
-	// HEDGE WORKING COMMENTED OUT TILL Normal Queue works with ChunkTask
-	// start listening for any Hedge Work coming in
-	// for {
-	// 	select {
-	// 	case hc := <-workerInfo.HedgeChan:
-	// 		worker.Chunk.SharedWriteOffset = hc.SharedWriteOffset
-	// 		worker.Chunk.Hedged.CompareAndSwap(false, true)
-	// 		startPos := ((int64(hc.ChunkIndex)) * rdi.ChunkSize)
-	// 		endPos := int64(math.Min(float64(((int64(hc.ChunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
-	// 		err := worker.downloadChunk(hc.ChunkIndex, startPos, endPos, rdi)
-	// 		rdi.HedgeWg.Done()
-	// 		if err != nil {
-	// 			onError(err)
-	// 		}
-	// 	case <-rdi.HedgeDone:
-	// 		return
-	// 	}
-	// }
 }
 
 // <== Helper Functions ==>

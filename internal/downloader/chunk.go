@@ -18,6 +18,9 @@ type ChunkTask struct {
 
 	ReservationHead atomic.Int64 // Next reservable range's start byte
 	CommittedBytes  atomic.Int64 // total bytes committed (perfectly written) to the file
+
+	ChunkVersion      atomic.Int32
+	UnresolvedTickets atomic.Int32
 }
 
 func (ct *ChunkTask) reserveRange(maxBlock int64) (start int64, end int64, ok bool) {
@@ -27,10 +30,8 @@ func (ct *ChunkTask) reserveRange(maxBlock int64) (start int64, end int64, ok bo
 			return 0, 0, false
 		}
 
-		next := cur + maxBlock
-		if next >= ct.End {
-			next = ct.End
-		}
+		// choose whichever is smaller -> in case cur + maxBlock goes ahead of ct.End
+		next := min(cur+maxBlock, ct.End)
 
 		if ct.ReservationHead.CompareAndSwap(cur, next) {
 			return cur, next, true

@@ -11,16 +11,6 @@ import (
 	"time"
 )
 
-// type ChunkInfo struct {
-// 	Index             int64
-// 	Size              int64
-// 	BytesDownloaded   int64
-// 	SharedWriteOffset *atomic.Int64
-// 	Hedged            atomic.Bool
-// 	Ctx               context.Context
-// 	Cancel            context.CancelFunc
-// }
-
 type WorkerStatus string
 
 const (
@@ -47,8 +37,9 @@ type WorkerInfo struct {
 	RestartedAt       time.Time
 	RestartWorkerChan chan struct{}
 	HttpClient        *http.Client
-	// HedgeChan         chan HedgeChunk
 }
+
+type PickMode uint8
 
 func (info *WorkerInfo) UpdateSpeed() float64 {
 	if info.LastSample.IsZero() {
@@ -65,7 +56,7 @@ func (info *WorkerInfo) UpdateSpeed() float64 {
 	return curSpeed
 }
 
-func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo, mode string) error {
+func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo, mode ChunkDownloadMode) error {
 	workerInfo.Status = WorkerStatusIdle
 
 	// Bind this worker to the current task
@@ -76,17 +67,24 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	defer unbindTaskFromWorker()
 
 	const maxRetries = 5
+	const maxHedgeReserveWindow = int64(512 * 1024)
 	var resp *http.Response
 	var doErr error
 	var success bool
 
 	var rangeStart, rangeEnd int64
 
-	if mode == "normal" {
+	switch mode {
+	case NormalMode:
 		rangeStart = currentTask.Start
 		rangeEnd = currentTask.End
-	} else {
-		// hedged code comes here
+	case HedgeMode:
+		reservedStart, reservedEnd, ok := currentTask.reserveRange(maxHedgeReserveWindow)
+		rangeStart = reservedStart
+		rangeEnd = reservedEnd
+		if !ok || reservedEnd <= reservedStart {
+			return nil
+		}
 	}
 
 	for range maxRetries {
