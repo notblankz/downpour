@@ -1,7 +1,6 @@
 package downloader
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"sync/atomic"
@@ -26,29 +25,18 @@ type chunkWriter struct {
 	curTask *ChunkTask
 	file    *os.File
 
-	reservedStart int64
-	reservedEnd   int64
-	writeCursor   int64
-
 	globalBytesWritten *atomic.Int64
 }
 
 func (cw *chunkWriter) Write(p []byte) (int, error) {
-	// Enforce range checking - this will also help us later with hedging chunk writing
-	if (cw.writeCursor + int64(len(p))) > (cw.reservedEnd - cw.reservedStart) {
-		return 0, fmt.Errorf("Fatal: write range provided might exceed reserved range - [%d, %d]",
-			cw.reservedStart, cw.reservedEnd,
-		)
-	}
-
-	fileOffest := cw.reservedStart + cw.writeCursor
+	fileOffest := cw.curTask.Start + cw.curTask.CommittedBytes.Load()
 	nwrite, err := cw.file.WriteAt(p, fileOffest)
 	if err != nil {
-		return nwrite, fmt.Errorf("Could not write to file at offset %d - %v", fileOffest, err)
+		return nwrite, err
 	}
 
-	cw.writeCursor += int64(nwrite)
 	cw.worker.TotalBytesWritten += int64(nwrite)
+	cw.curTask.CommittedBytes.Add(int64(nwrite))
 	cw.globalBytesWritten.Add(int64(nwrite))
 
 	return nwrite, nil

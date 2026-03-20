@@ -39,8 +39,6 @@ type WorkerInfo struct {
 	HttpClient        *http.Client
 }
 
-type PickMode uint8
-
 func (info *WorkerInfo) UpdateSpeed() float64 {
 	if info.LastSample.IsZero() {
 		info.LastBytes = info.TotalBytesWritten
@@ -56,7 +54,7 @@ func (info *WorkerInfo) UpdateSpeed() float64 {
 	return curSpeed
 }
 
-func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo, mode ChunkDownloadMode) error {
+func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo) error {
 	workerInfo.Status = WorkerStatusIdle
 
 	// Bind this worker to the current task
@@ -67,25 +65,9 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	defer unbindTaskFromWorker()
 
 	const maxRetries = 5
-	const maxHedgeReserveWindow = int64(512 * 1024)
 	var resp *http.Response
 	var doErr error
 	var success bool
-
-	var rangeStart, rangeEnd int64
-
-	switch mode {
-	case NormalMode:
-		rangeStart = currentTask.Start
-		rangeEnd = currentTask.End
-	case HedgeMode:
-		reservedStart, reservedEnd, ok := currentTask.reserveRange(maxHedgeReserveWindow)
-		rangeStart = reservedStart
-		rangeEnd = reservedEnd
-		if !ok || reservedEnd <= reservedStart {
-			return nil
-		}
-	}
 
 	for range maxRetries {
 		workerInfo.Status = WorkerStatusRequesting
@@ -93,20 +75,20 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 		if err != nil {
 			return err
 		}
-		req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", rangeStart, rangeEnd-1))
+		req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", currentTask.Start, currentTask.End-1))
 
 		if rdi.StatusFlags.EnableTrace {
 			trace := &httptrace.ClientTrace{
 				GotConn: func(connInfo httptrace.GotConnInfo) {
 					if connInfo.Reused {
-						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] Connection Reused | Hedged Chunk: %v | IdleTime: %v", workerInfo.ID, currentTask.Index, currentTask.Hedged.Load(), connInfo.IdleTime)
+						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] Connection Reused | IdleTime: %v", workerInfo.ID, currentTask.Index, connInfo.IdleTime)
 					} else {
-						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Hedged Chunk: %v | Addr: %v", workerInfo.ID, currentTask.Index, currentTask.Hedged.Load(), connInfo.Conn.RemoteAddr())
+						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Addr: %v", workerInfo.ID, currentTask.Index, connInfo.Conn.RemoteAddr())
 					}
 				},
 				WroteRequest: func(info httptrace.WroteRequestInfo) {
 					if info.Err != nil {
-						rdi.Logger.HttpTrace.Printf("[Worker %d::Chunk %d] Hedged Chunk: %v | Write Error: %v", workerInfo.ID, currentTask.Index, currentTask.Hedged.Load(), info.Err)
+						rdi.Logger.HttpTrace.Printf("[Worker %d::Chunk %d] Write Error: %v", workerInfo.ID, currentTask.Index, info.Err)
 					}
 				},
 			}
@@ -133,9 +115,6 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 
 	if !success {
 		if errors.Is(doErr, context.Canceled) {
-			if rdi.StatusFlags.EnableTrace {
-				rdi.Logger.Hedging.Printf("[Worker %2d::Chunk %4d] CANCELLED | Chunk was hedged by another worker", workerInfo.ID, currentTask.Index)
-			}
 			return nil
 		}
 		return fmt.Errorf("FATAL: worker %d failed on chunk %d after %d retries. Last error: %v", workerInfo.ID, currentTask.Index, maxRetries, doErr)
@@ -147,29 +126,16 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	cw := rdi.WriterPool.Get().(*chunkWriter)
 	cw.worker = workerInfo
 	cw.curTask = currentTask
-	cw.reservedStart = rangeStart
-	cw.reservedEnd = rangeEnd
-	cw.writeCursor = 0
 
 	_, copyErr := io.CopyBuffer(cw, resp.Body, cw.buf)
 	resp.Body.Close()
 	rdi.WriterPool.Put(cw)
 
-	if copyErr == nil {
-		bytesWritten := cw.writeCursor
-
-		currentTask.CommittedBytes.Add(bytesWritten)
-
-		chunkSize := currentTask.End - currentTask.Start
-		if currentTask.CommittedBytes.Load() >= chunkSize {
-			if currentTask.Done.CompareAndSwap(false, true) {
-				currentTask.Cancel()
-			}
-		}
-	} else {
+	if copyErr != nil {
 		if errors.Is(copyErr, context.Canceled) {
 			return nil
 		}
+		return copyErr
 	}
 
 	workerInfo.Status = WorkerStatusIdle

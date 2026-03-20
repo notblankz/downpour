@@ -56,7 +56,6 @@ func (rdi *RangeDownloadInfo) StartTelemetry(ctx context.Context) error {
 
 type Logger struct {
 	HttpTrace *log.Logger
-	Hedging   *log.Logger
 	Restarts  *log.Logger
 	Writes    *log.Logger
 }
@@ -78,12 +77,6 @@ func (rdi *RangeDownloadInfo) getLoggers() (*Logger, []*os.File, error) {
 		return nil, nil, err
 	}
 	logger.HttpTrace, files = l, append(files, f)
-
-	l, f, err = openLog("hedging.log")
-	if err != nil {
-		return nil, nil, err
-	}
-	logger.Hedging, files = l, append(files, f)
 
 	l, f, err = openLog("restarts.log")
 	if err != nil {

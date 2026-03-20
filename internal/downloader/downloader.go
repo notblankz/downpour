@@ -77,8 +77,6 @@ type Workers struct {
 }
 type RangeDownloadInfo struct {
 	NormalQueue         chan *ChunkTask
-	HedgeTicketQueue    chan *HedgeTicket
-	CurHedgePhase       HedgePhase
 	WriterPool          *sync.Pool
 	NormalWorkerWg      *sync.WaitGroup
 	Workers             Workers
@@ -212,13 +210,6 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 				Start: startPos,
 				End:   endPos,
 
-				// all atomic variables are initialised to default
-				// WriteHead: 	0
-				// Hedged: 		false
-				// Done: 		false
-				// ReservationHead: 0
-				// CommittedBytes: 0
-
 				Ctx:    chunkCtx,
 				Cancel: cancelChunk,
 			}
@@ -277,7 +268,7 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 
 		// if no signal from health monitor continue with downloading the chunk
 		// ask for a chunk task from the scheduler
-		chunkTask, mode, ok := rdi.pickTaskForWorker(worker)
+		chunkTask, ok := rdi.pickTaskForWorker()
 		if !ok {
 			worker.KillWorker()
 			return
@@ -286,15 +277,14 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 			continue
 		}
 
-		err := worker.downloadChunk(chunkTask, rdi, mode)
+		err := worker.downloadChunk(chunkTask, rdi)
 		if err != nil {
 			onError(err)
 		}
 
-		rdi.Logger.Writes.Printf("[Worker %2d::Chunk %4d] WROTE CHUNK | Hedged Chunk: %v | Start: %d | End: %d",
+		rdi.Logger.Writes.Printf("[Worker %2d::Chunk %4d] WROTE CHUNK | Start: %d | End: %d",
 			worker.ID,
 			chunkTask.Index,
-			chunkTask.Hedged.Load(),
 			chunkTask.Start,
 			chunkTask.End-1,
 		)
