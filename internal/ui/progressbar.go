@@ -213,7 +213,12 @@ func (m Model) formatWorker(workerInfo *downloader.WorkerInfo) string {
 	default:
 		speedStr = utils.FormatSpeedString(workerInfo.Speed, "B/s")
 	}
-	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, speedStr, fmt.Sprintf("#%d", workerInfo.Chunk.Index))
+
+	curChunk := "None"
+	if workerInfo.CurTask != nil {
+		curChunk = fmt.Sprintf("#%d", workerInfo.CurTask.Index)
+	}
+	return fmt.Sprintf("W%d - %8s [chunk %5s]", workerInfo.ID, speedStr, curChunk)
 }
 
 func (m Model) formatWorkerGrid(rdi *downloader.RangeDownloadInfo) string {

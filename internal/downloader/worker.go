@@ -6,23 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
-	"math"
 	"net/http"
 	"net/http/httptrace"
-	"sync/atomic"
 	"time"
 )
-
-type ChunkInfo struct {
-	Index             int64
-	Size              int64
-	BytesDownloaded   int64
-	SharedWriteOffset *atomic.Int64
-	Hedged            atomic.Bool
-	Ctx               context.Context
-	Cancel            context.CancelFunc
-}
 
 type WorkerStatus string
 
@@ -35,15 +22,12 @@ const (
 	WorkerStatusRestarting  WorkerStatus = "restarting"
 )
 
-type HedgeChunk struct {
-	ChunkIndex        int64
-	SharedWriteOffset *atomic.Int64
-}
 type WorkerInfo struct {
-	ID                int
-	WorkerCtx         context.Context
-	KillWorker        context.CancelFunc
-	Chunk             *ChunkInfo
+	ID         int
+	WorkerCtx  context.Context
+	KillWorker context.CancelFunc
+	// Chunk             *ChunkInfo
+	CurTask           *ChunkTask
 	Speed             float64
 	TotalBytesWritten int64
 	LastBytes         int64
@@ -52,7 +36,6 @@ type WorkerInfo struct {
 	StartedAt         time.Time
 	RestartedAt       time.Time
 	RestartWorkerChan chan struct{}
-	HedgeChan         chan HedgeChunk
 	HttpClient        *http.Client
 }
 
@@ -71,51 +54,41 @@ func (info *WorkerInfo) UpdateSpeed() float64 {
 	return curSpeed
 }
 
-func (workerInfo *WorkerInfo) downloadChunk(chunkIndex int, rdi *RangeDownloadInfo, logger *log.Logger) error {
+func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo) error {
 	workerInfo.Status = WorkerStatusIdle
-	startPos := ((int64(chunkIndex)) * rdi.ChunkSize)
-	endPos := int64(math.Min(float64(((int64(chunkIndex)+1)*rdi.ChunkSize)-1), float64(rdi.TotalSize-1)))
 
-	// Add information to the WorkerInfo
-	workerInfo.Chunk.Index = int64(chunkIndex)
-	workerInfo.Chunk.Size = endPos - startPos
-	workerInfo.Chunk.BytesDownloaded = 0
-	if !workerInfo.Chunk.Hedged.Load() {
-		swo := &atomic.Int64{}
-		swo.Store(startPos)
-		workerInfo.Chunk.SharedWriteOffset = swo
+	// Bind this worker to the current task
+	workerInfo.CurTask = currentTask
+	unbindTaskFromWorker := func() {
+		workerInfo.CurTask = nil
 	}
+	defer unbindTaskFromWorker()
 
 	const maxRetries = 5
 	var resp *http.Response
 	var doErr error
 	var success bool
 
-	ctx, cancelChunk := context.WithCancel(workerInfo.WorkerCtx)
-	workerInfo.Chunk.Ctx = ctx
-	workerInfo.Chunk.Cancel = cancelChunk
-	defer cancelChunk()
-
 	for range maxRetries {
 		workerInfo.Status = WorkerStatusRequesting
-		req, err := http.NewRequestWithContext(workerInfo.Chunk.Ctx, "GET", rdi.ReqURL, nil)
+		req, err := http.NewRequestWithContext(currentTask.Ctx, "GET", rdi.ReqURL, nil)
 		if err != nil {
 			return err
 		}
-		req.Header.Add("Range", fmt.Sprintf("bytes=%v-%v", startPos, endPos))
+		req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", currentTask.Start, currentTask.End-1))
 
 		if rdi.StatusFlags.EnableTrace {
 			trace := &httptrace.ClientTrace{
 				GotConn: func(connInfo httptrace.GotConnInfo) {
 					if connInfo.Reused {
-						logger.Printf("[Worker %2d::Chunk %4d] Connection Reused | Hedged Chunk: %v | IdleTime: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), connInfo.IdleTime)
+						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] Connection Reused | IdleTime: %v", workerInfo.ID, currentTask.Index, connInfo.IdleTime)
 					} else {
-						logger.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Hedged Chunk: %v | Addr: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), connInfo.Conn.RemoteAddr())
+						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Addr: %v", workerInfo.ID, currentTask.Index, connInfo.Conn.RemoteAddr())
 					}
 				},
 				WroteRequest: func(info httptrace.WroteRequestInfo) {
 					if info.Err != nil {
-						logger.Printf("[Worker %d::Chunk %d] Hedged Chunk: %v | Write Error: %v", workerInfo.ID, workerInfo.Chunk.Index, workerInfo.Chunk.Hedged.Load(), info.Err)
+						rdi.Logger.HttpTrace.Printf("[Worker %d::Chunk %d] Write Error: %v", workerInfo.ID, currentTask.Index, info.Err)
 					}
 				},
 			}
@@ -142,29 +115,29 @@ func (workerInfo *WorkerInfo) downloadChunk(chunkIndex int, rdi *RangeDownloadIn
 
 	if !success {
 		if errors.Is(doErr, context.Canceled) {
-			if rdi.StatusFlags.EnableTrace {
-				logger.Printf("[Worker %2d::Chunk %4d] CANCELLED | Chunk was hedged by another worker", workerInfo.ID, workerInfo.Chunk.Index)
-			}
 			return nil
 		}
-		return fmt.Errorf("FATAL: worker %d failed on chunk %d after %d retries. Last error: %v", workerInfo.ID, workerInfo.Chunk.Index, maxRetries, doErr)
+		return fmt.Errorf("FATAL: worker %d failed on chunk %d after %d retries. Last error: %v", workerInfo.ID, currentTask.Index, maxRetries, doErr)
 	}
 
 	// write to file
 	workerInfo.Status = WorkerStatusDownloading
+
 	cw := rdi.WriterPool.Get().(*chunkWriter)
 	cw.worker = workerInfo
-	cw.offset = startPos
-	cw.chunkEndOffset = endPos
+	cw.curTask = currentTask
+
 	_, copyErr := io.CopyBuffer(cw, resp.Body, cw.buf)
 	resp.Body.Close()
 	rdi.WriterPool.Put(cw)
+
 	if copyErr != nil {
 		if errors.Is(copyErr, context.Canceled) {
 			return nil
 		}
 		return copyErr
 	}
+
 	workerInfo.Status = WorkerStatusIdle
 
 	return nil

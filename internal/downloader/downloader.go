@@ -4,7 +4,6 @@ import (
 	"context"
 	"downpour/internal/utils"
 	"fmt"
-	"log"
 	"math"
 	"mime"
 	"net/http"
@@ -25,7 +24,7 @@ type VerifyFunc func()
 
 const bufferSize = 64 * 1024          // 64KB
 const minChunkSize = 256 * 1024       // 256KB
-const maxChunkSize = 16 * 1024 * 1024 // 2MB
+const maxChunkSize = 16 * 1024 * 1024 // 16MB
 const workerLimit = 32
 
 func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
@@ -77,13 +76,12 @@ type Workers struct {
 	Slice []*WorkerInfo
 }
 type RangeDownloadInfo struct {
-	ChunkChan           chan int
+	NormalQueue         chan *ChunkTask
 	WriterPool          *sync.Pool
-	Wg                  *sync.WaitGroup
-	HedgeWg             *sync.WaitGroup
-	HedgeDone           chan struct{}
+	NormalWorkerWg      *sync.WaitGroup
 	Workers             Workers
 	TotalChunks         int64
+	Chunks              []*ChunkTask
 	ChunkSize           int64
 	TotalSize           int64
 	BytesWritten        *atomic.Int64
@@ -94,6 +92,7 @@ type RangeDownloadInfo struct {
 	StatusFlags         StatusFlags
 	Checksum            *ChecksumInfo
 	WorkerBaselineSpeed float64
+	Logger              *Logger
 }
 
 func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, statusFlags StatusFlags) (*RangeDownloadInfo, error) {
@@ -101,6 +100,8 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 	if totalSize < minChunkSize {
 		chunkSize = totalSize
 	}
+
+	totalChunks := int64(math.Ceil(float64(totalSize) / float64(chunkSize)))
 
 	var dirName string
 	if statusFlags.EnableTrace || statusFlags.EnableTelemetry {
@@ -125,20 +126,18 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 
 	// create a WaitGroup and a Atomic Int64 Variable
 	var wg sync.WaitGroup
-	var hedgeWg sync.WaitGroup
 	var bytesWritten atomic.Int64
 
 	workerSlice := make([]*WorkerInfo, workerLimit)
 	for i := range workerSlice {
-		workerInfo := &WorkerInfo{
-			ID:                i,
-			Chunk:             &ChunkInfo{},
+		worker := &WorkerInfo{
+			ID: i,
+			// Chunk:             &ChunkInfo{},
 			Status:            WorkerStatusIdle,
 			HttpClient:        newWorkerClient(),
 			RestartWorkerChan: make(chan struct{}, 1),
-			HedgeChan:         make(chan HedgeChunk, 1),
 		}
-		workerSlice[i] = workerInfo
+		workerSlice[i] = worker
 	}
 	workers := Workers{
 		Limit: workerLimit,
@@ -158,14 +157,13 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 	}
 
 	rdi := &RangeDownloadInfo{
-		ChunkChan:           make(chan int),
+		NormalQueue:         make(chan *ChunkTask),
 		WriterPool:          pool,
-		Wg:                  &wg,
-		HedgeWg:             &hedgeWg,
-		HedgeDone:           make(chan struct{}),
+		NormalWorkerWg:      &wg,
 		Workers:             workers,
 		ChunkSize:           chunkSize,
-		TotalChunks:         int64(math.Ceil(float64(totalSize) / float64(chunkSize))),
+		TotalChunks:         totalChunks,
+		Chunks:              make([]*ChunkTask, totalChunks),
 		TotalSize:           totalSize,
 		BytesWritten:        &bytesWritten,
 		ReqURL:              reqURl,
@@ -185,21 +183,44 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 		return
 	}
 
+	// Create all loggers and log files
+	logger, logFiles, logErr := rdi.getLoggers()
+	for _, logFile := range logFiles {
+		defer logFile.Close()
+	}
+	if logErr != nil {
+		onError(fmt.Errorf("Could not create and start all the required loggers"))
+	}
+	rdi.Logger = logger
+
 	// spawn downloader go routines and wait for completion
-	rdi.Wg.Add(rdi.Workers.Limit)
+	rdi.NormalWorkerWg.Add(rdi.Workers.Limit)
 	for i := 0; i < rdi.Workers.Limit; i++ {
 		go rdi.rangeDownloadWorker(rdi.Workers.Slice[i], onError)
 	}
 	go func() {
-		for chunkIndex := 0; int64(chunkIndex) < rdi.TotalChunks; chunkIndex++ {
-			rdi.ChunkChan <- chunkIndex
+		for chunkIndex := int64(0); chunkIndex < rdi.TotalChunks; chunkIndex++ {
+			startPos := chunkIndex * rdi.ChunkSize
+			endPos := min(rdi.TotalSize, ((chunkIndex + 1) * rdi.ChunkSize))
+
+			chunkCtx, cancelChunk := context.WithCancel(context.Background())
+
+			ct := &ChunkTask{
+				Index: chunkIndex,
+				Start: startPos,
+				End:   endPos,
+
+				Ctx:    chunkCtx,
+				Cancel: cancelChunk,
+			}
+
+			rdi.Chunks[chunkIndex] = ct
+
+			rdi.NormalQueue <- ct
 		}
-		close(rdi.ChunkChan)
+		close(rdi.NormalQueue)
 	}()
-	rdi.Wg.Wait()
-	// wait for all hedge workers to complete & then send a close signal to them for them to return
-	rdi.HedgeWg.Wait()
-	close(rdi.HedgeDone)
+	rdi.NormalWorkerWg.Wait()
 	rdi.File.Close()
 
 	if rdi.Checksum != nil {
@@ -214,64 +235,59 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 	onDone()
 }
 
-func (rdi *RangeDownloadInfo) rangeDownloadWorker(workerInfo *WorkerInfo, onError ErrorFunc) {
-	workerInfo.StartedAt = time.Now()
-	workerInfo.RestartedAt = time.Now()
-
-	var logger *log.Logger
-	var logFile *os.File
+func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError ErrorFunc) {
+	worker.StartedAt = time.Now()
+	worker.RestartedAt = time.Now()
 
 	ctx, cancelWorker := context.WithCancel(context.Background())
-	workerInfo.KillWorker = cancelWorker
-	workerInfo.WorkerCtx = ctx
+	worker.KillWorker = cancelWorker
+	worker.WorkerCtx = ctx
 
-	if rdi.StatusFlags.EnableTrace {
-		logger, logFile = rdi.getTraceLogger()
-		defer logFile.Close()
-	}
+	// gracefully exit worker once it completes downloading all the chunk tasks assigned to it
+	defer func() {
+		worker.Status = WorkerStatusDone
+		rdi.NormalWorkerWg.Done()
+	}()
 
-	for chunkIndex := range rdi.ChunkChan {
+	for {
+
 		// check for a restart signal from health monitor
 		select {
-		case <-workerInfo.RestartWorkerChan:
-			workerInfo.Status = WorkerStatusRestarting
-			workerInfo.HttpClient = newWorkerClient()
+		case <-worker.RestartWorkerChan:
+			worker.Status = WorkerStatusRestarting
+			worker.HttpClient = newWorkerClient()
 			if rdi.StatusFlags.EnableTrace {
-				logger.Printf("[Worker %2d::Chunk %4d] RESTARTED | Worker Speed was: %s | Workers Baseline Speed: %s",
-					workerInfo.ID,
-					workerInfo.Chunk.Index,
-					utils.FormatSpeedString(workerInfo.Speed, "B/s"),
+				rdi.Logger.Restarts.Printf("[Worker %2d] RESTARTED | Worker Speed was: %s | Workers Baseline Speed: %s",
+					worker.ID,
+					utils.FormatSpeedString(worker.Speed, "B/s"),
 					utils.FormatSpeedString(rdi.WorkerBaselineSpeed, "B/s"))
 			}
-			workerInfo.Status = WorkerStatusIdle
+			worker.Status = WorkerStatusIdle
 		default:
 		}
 
 		// if no signal from health monitor continue with downloading the chunk
-		err := workerInfo.downloadChunk(chunkIndex, rdi, logger)
+		// ask for a chunk task from the scheduler
+		chunkTask, ok := rdi.pickTaskForWorker()
+		if !ok {
+			worker.KillWorker()
+			return
+		}
+		if chunkTask == nil {
+			continue
+		}
+
+		err := worker.downloadChunk(chunkTask, rdi)
 		if err != nil {
 			onError(err)
 		}
-	}
 
-	// completed downloading all the normal chunks assigned to it
-	workerInfo.Status = WorkerStatusDone
-	rdi.Wg.Done()
-
-	// start listening for any Hedge Work coming in
-	for {
-		select {
-		case hc := <-workerInfo.HedgeChan:
-			workerInfo.Chunk.SharedWriteOffset = hc.SharedWriteOffset
-			workerInfo.Chunk.Hedged.CompareAndSwap(false, true)
-			err := workerInfo.downloadChunk(int(hc.ChunkIndex), rdi, logger)
-			rdi.HedgeWg.Done()
-			if err != nil {
-				onError(err)
-			}
-		case <-rdi.HedgeDone:
-			return
-		}
+		rdi.Logger.Writes.Printf("[Worker %2d::Chunk %4d] WROTE CHUNK | Start: %d | End: %d",
+			worker.ID,
+			chunkTask.Index,
+			chunkTask.Start,
+			chunkTask.End-1,
+		)
 	}
 }
 

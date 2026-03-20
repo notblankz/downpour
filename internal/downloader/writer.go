@@ -1,7 +1,6 @@
 package downloader
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"sync/atomic"
@@ -21,32 +20,25 @@ import (
 // struct to implement io.Writer for custom use of WriteAt() instead of Write() in io.Copy()
 
 type chunkWriter struct {
-	buf                []byte
-	worker             *WorkerInfo
-	file               *os.File
-	offset             int64
-	chunkEndOffset     int64
+	buf     []byte
+	worker  *WorkerInfo
+	curTask *ChunkTask
+	file    *os.File
+
 	globalBytesWritten *atomic.Int64
 }
 
 func (cw *chunkWriter) Write(p []byte) (int, error) {
-	nwrite, err := cw.file.WriteAt(p, int64(cw.offset))
+	fileOffest := cw.curTask.Start + cw.curTask.CommittedBytes.Load()
+	nwrite, err := cw.file.WriteAt(p, fileOffest)
 	if err != nil {
-		return nwrite, fmt.Errorf("Could not write to file at offset %v - %v", cw.offset, err)
+		return nwrite, err
 	}
-	cw.offset += int64(nwrite)
-	cw.worker.Chunk.BytesDownloaded += int64(nwrite)
+
 	cw.worker.TotalBytesWritten += int64(nwrite)
-	updatedOffset := cw.offset
-	oldSharedOffset := cw.worker.Chunk.SharedWriteOffset.Load()
-	if updatedOffset > oldSharedOffset {
-		if cw.worker.Chunk.SharedWriteOffset.CompareAndSwap(oldSharedOffset, updatedOffset) {
-			newBytes := updatedOffset - oldSharedOffset
-			cw.globalBytesWritten.Add(newBytes)
-		}
-	} else if oldSharedOffset >= cw.chunkEndOffset {
-		cw.worker.Chunk.Cancel()
-	}
+	cw.curTask.CommittedBytes.Add(int64(nwrite))
+	cw.globalBytesWritten.Add(int64(nwrite))
+
 	return nwrite, nil
 }
 
