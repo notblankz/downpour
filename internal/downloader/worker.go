@@ -3,11 +3,13 @@ package downloader
 import (
 	"context"
 	"crypto/tls"
+	"downpour/internal/utils"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"time"
 )
 
@@ -36,6 +38,7 @@ type WorkerInfo struct {
 	StartedAt         time.Time
 	RestartedAt       time.Time
 	RestartWorkerChan chan struct{}
+	Mirror            *MirrorInfo
 	HttpClient        *http.Client
 }
 
@@ -55,6 +58,7 @@ func (info *WorkerInfo) UpdateSpeed() float64 {
 }
 
 func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo) error {
+	startTime := time.Now()
 	workerInfo.Status = WorkerStatusIdle
 
 	// Bind this worker to the current task
@@ -71,7 +75,7 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 
 	for range maxRetries {
 		workerInfo.Status = WorkerStatusRequesting
-		req, err := http.NewRequestWithContext(currentTask.Ctx, "GET", rdi.ReqURL, nil)
+		req, err := http.NewRequestWithContext(currentTask.Ctx, "GET", workerInfo.Mirror.URL, nil)
 		if err != nil {
 			return err
 		}
@@ -80,15 +84,17 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 		if rdi.StatusFlags.EnableTrace {
 			trace := &httptrace.ClientTrace{
 				GotConn: func(connInfo httptrace.GotConnInfo) {
-					if connInfo.Reused {
-						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] Connection Reused | IdleTime: %v", workerInfo.ID, currentTask.Index, connInfo.IdleTime)
-					} else {
-						rdi.Logger.HttpTrace.Printf("[Worker %2d::Chunk %4d] NEW Connection Dialed | Addr: %v", workerInfo.ID, currentTask.Index, connInfo.Conn.RemoteAddr())
+					if !connInfo.Reused {
+						addr := ""
+						if connInfo.Conn != nil {
+							addr = connInfo.Conn.RemoteAddr().String()
+						}
+						rdi.Logger.HttpTrace.Printf("[INFO] [Worker %02d::Chunk %04d] NEW CONN | addr=%s", workerInfo.ID, currentTask.Index, addr)
 					}
 				},
 				WroteRequest: func(info httptrace.WroteRequestInfo) {
 					if info.Err != nil {
-						rdi.Logger.HttpTrace.Printf("[Worker %d::Chunk %d] Write Error: %v", workerInfo.ID, currentTask.Index, info.Err)
+						rdi.Logger.HttpTrace.Printf("[ERROR] [Worker %02d::Chunk %04d] WRITE ERROR | err=%v", workerInfo.ID, currentTask.Index, info.Err)
 					}
 				},
 			}
@@ -114,8 +120,21 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	}
 
 	if !success {
+		host := mirrorHostname(workerInfo.Mirror.URL)
+		rdi.Logger.Writes.Printf("[ERROR] [Worker %02d::Chunk %04d] CHUNK FAILED | mirror=%s | err=%v",
+			workerInfo.ID,
+			currentTask.Index,
+			host,
+			doErr,
+		)
 		if errors.Is(doErr, context.Canceled) {
 			return nil
+		}
+		workerInfo.Mirror.Failures.Add(1)
+		if workerInfo.Mirror.Failures.Load() >= 3 {
+			if workerInfo.Mirror.Dead.CompareAndSwap(false, true) {
+				rdi.Logger.Mirrors.Printf("[INFO] [Mirror] DEAD | url=%s | failures=%d", host, workerInfo.Mirror.Failures.Load())
+			}
 		}
 		return fmt.Errorf("FATAL: worker %d failed on chunk %d after %d retries. Last error: %v", workerInfo.ID, currentTask.Index, maxRetries, doErr)
 	}
@@ -139,8 +158,27 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	}
 
 	workerInfo.Status = WorkerStatusIdle
+	rdi.Logger.Writes.Printf("[INFO] [Worker %02d::Chunk %04d] CHUNK DONE | mirror=%s | bytes=%d | duration=%s",
+		workerInfo.ID,
+		currentTask.Index,
+		mirrorHostname(workerInfo.Mirror.URL),
+		currentTask.CommittedBytes.Load(),
+		utils.FormatDuration(time.Since(startTime)),
+	)
 
 	return nil
+}
+
+func mirrorHostname(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return rawURL
+	}
+	return host
 }
 
 func newWorkerClient() *http.Client {

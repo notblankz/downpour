@@ -11,15 +11,23 @@ const MonitorInterval = 1 * time.Second
 func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 	ticker := time.NewTicker(MonitorInterval)
 	defer ticker.Stop()
+	MirrorWorkerMap := make(map[*MirrorInfo][]*WorkerInfo)
 
 	for {
 		select {
 		case <-ticker.C:
 
+			clear(MirrorWorkerMap)
+			// reset mirror speeds
+			for _, mi := range rdi.Mirrors {
+				mi.Speed = 0
+			}
 			// copy current worker speeds
 			var workerSpeeds []float64
 			for _, wi := range rdi.Workers.Slice {
 				wi.UpdateSpeed()
+				MirrorWorkerMap[wi.Mirror] = append(MirrorWorkerMap[wi.Mirror], wi)
+				wi.Mirror.Speed += wi.Speed
 				if wi.Status != WorkerStatusDone {
 					workerSpeeds = append(workerSpeeds, wi.Speed)
 				}
@@ -63,6 +71,8 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 					}
 				}
 			}
+
+			rdi.rebalanceMirrors(MirrorWorkerMap)
 		case <-ctx.Done():
 			return nil
 		}

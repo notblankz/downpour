@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -14,31 +13,22 @@ import (
 	"downpour/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
+	flag "github.com/spf13/pflag"
 )
 
 var version = "dev"
 
 func main() {
 	var helpFlag, httpLogFlag, telemetryFlag, versionFlag bool
-	var expectedHash, algorithm string
+	var expectedHash, algorithm, mirrorURLs string
 
-	flag.BoolVar(&helpFlag, "help", false, "Show help message")
-	flag.BoolVar(&helpFlag, "h", false, "Show help message (shorthand)")
-
-	flag.BoolVar(&httpLogFlag, "httplog", false, "Generate HTTP trace logfile")
-	flag.BoolVar(&httpLogFlag, "hl", false, "Generate HTTP trace logfile (shorthand)")
-
-	flag.BoolVar(&telemetryFlag, "telemetry", false, "Generate download telemetry CSV")
-	flag.BoolVar(&telemetryFlag, "tel", false, "Generate download telemetry CSV (shorthand)")
-
-	flag.StringVar(&expectedHash, "checksum", "", "Expected checksum hash")
-	flag.StringVar(&expectedHash, "c", "", "Expected checksum hash (shorthand)")
-
-	flag.StringVar(&algorithm, "algorithm", "", "Cryptographic algorithm")
-	flag.StringVar(&algorithm, "a", "", "Cryptographic algorithm (shorthand)")
-
-	flag.BoolVar(&versionFlag, "version", false, "Print version")
-	flag.BoolVar(&versionFlag, "v", false, "Print version (shorthand)")
+	flag.BoolVarP(&telemetryFlag, "telemetry", "t", false, "Generate download telemetry CSV")
+	flag.BoolVarP(&httpLogFlag, "httplog", "l", false, "Generate HTTP trace logfile")
+	flag.StringVarP(&mirrorURLs, "mirrors", "m", "", "Mirror URLs (comma-separated)")
+	flag.StringVarP(&expectedHash, "checksum", "c", "", "Expected checksum hash")
+	flag.StringVarP(&algorithm, "algorithm", "a", "", "Cryptographic algorithm")
+	flag.BoolVarP(&versionFlag, "version", "v", false, "Print version")
+	flag.BoolVarP(&helpFlag, "help", "h", false, "Show help message")
 
 	flag.Parse()
 
@@ -101,7 +91,20 @@ func main() {
 		EnableTelemetry: telemetryFlag,
 	}
 
-	rdi, initErr := downloader.InitRangeDownloadInfo(filename, totalSize, urlString, statusFlags)
+	mirrors := []*downloader.MirrorInfo{
+		{URL: urlString},
+	}
+
+	if mirrorURLs != "" {
+		for mirrorURL := range strings.SplitSeq(mirrorURLs, ",") {
+			mirrorURL = strings.TrimSpace(mirrorURL)
+			if mirrorURL != "" {
+				mirrors = append(mirrors, &downloader.MirrorInfo{URL: mirrorURL})
+			}
+		}
+	}
+
+	rdi, initErr := downloader.InitRangeDownloadInfo(filename, totalSize, statusFlags, mirrors)
 	if initErr != nil {
 		startErrorUI(initErr)
 		return

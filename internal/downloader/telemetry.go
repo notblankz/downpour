@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -58,15 +59,26 @@ type Logger struct {
 	HttpTrace *log.Logger
 	Restarts  *log.Logger
 	Writes    *log.Logger
+	Mirrors   *log.Logger
 }
 
 func (rdi *RangeDownloadInfo) getLoggers() (*Logger, []*os.File, error) {
+	if !rdi.StatusFlags.EnableTrace {
+		nop := log.New(io.Discard, "", 0)
+		return &Logger{
+			HttpTrace: nop,
+			Restarts:  nop,
+			Writes:    nop,
+			Mirrors:   nop,
+		}, nil, nil
+	}
+
 	openLog := func(name string) (*log.Logger, *os.File, error) {
 		f, err := os.OpenFile(filepath.Join(rdi.DirName, name), os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return nil, nil, err
 		}
-		return log.New(f, "", log.LstdFlags|log.Lmicroseconds), f, nil
+		return log.New(f, "", log.Ldate|log.Ltime|log.Lmicroseconds), f, nil
 	}
 
 	var files []*os.File
@@ -89,6 +101,12 @@ func (rdi *RangeDownloadInfo) getLoggers() (*Logger, []*os.File, error) {
 		return nil, nil, err
 	}
 	logger.Writes, files = l, append(files, f)
+
+	l, f, err = openLog("mirrors.log")
+	if err != nil {
+		return nil, nil, err
+	}
+	logger.Mirrors, files = l, append(files, f)
 
 	return logger, files, nil
 }

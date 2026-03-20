@@ -85,7 +85,7 @@ type RangeDownloadInfo struct {
 	ChunkSize           int64
 	TotalSize           int64
 	BytesWritten        *atomic.Int64
-	ReqURL              string
+	Mirrors             []*MirrorInfo
 	Filename            string
 	DirName             string
 	File                *os.File
@@ -95,7 +95,7 @@ type RangeDownloadInfo struct {
 	Logger              *Logger
 }
 
-func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, statusFlags StatusFlags) (*RangeDownloadInfo, error) {
+func InitRangeDownloadInfo(filename string, totalSize int64, statusFlags StatusFlags, mirrors []*MirrorInfo) (*RangeDownloadInfo, error) {
 	chunkSize := int64(maxChunkSize)
 	if totalSize < minChunkSize {
 		chunkSize = totalSize
@@ -129,15 +129,20 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 	var bytesWritten atomic.Int64
 
 	workerSlice := make([]*WorkerInfo, workerLimit)
+	mirrorIdx := 0
 	for i := range workerSlice {
+		if mirrorIdx >= len(mirrors) {
+			mirrorIdx = 0
+		}
 		worker := &WorkerInfo{
-			ID: i,
-			// Chunk:             &ChunkInfo{},
+			ID:                i,
 			Status:            WorkerStatusIdle,
 			HttpClient:        newWorkerClient(),
 			RestartWorkerChan: make(chan struct{}, 1),
+			Mirror:            mirrors[mirrorIdx],
 		}
 		workerSlice[i] = worker
+		mirrorIdx++
 	}
 	workers := Workers{
 		Limit: workerLimit,
@@ -166,7 +171,7 @@ func InitRangeDownloadInfo(filename string, totalSize int64, reqURl string, stat
 		Chunks:              make([]*ChunkTask, totalChunks),
 		TotalSize:           totalSize,
 		BytesWritten:        &bytesWritten,
-		ReqURL:              reqURl,
+		Mirrors:             mirrors,
 		Filename:            filename,
 		DirName:             dirName,
 		File:                file,
@@ -192,6 +197,12 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 		onError(fmt.Errorf("Could not create and start all the required loggers"))
 	}
 	rdi.Logger = logger
+	rdi.Logger.Writes.Printf("[INFO] [Download] START | size=%s | chunks=%d | workers=%d | mirrors=%d",
+		formatBytes(rdi.TotalSize),
+		rdi.TotalChunks,
+		rdi.Workers.Limit,
+		len(rdi.Mirrors),
+	)
 
 	// spawn downloader go routines and wait for completion
 	rdi.NormalWorkerWg.Add(rdi.Workers.Limit)
@@ -256,12 +267,11 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 		case <-worker.RestartWorkerChan:
 			worker.Status = WorkerStatusRestarting
 			worker.HttpClient = newWorkerClient()
-			if rdi.StatusFlags.EnableTrace {
-				rdi.Logger.Restarts.Printf("[Worker %2d] RESTARTED | Worker Speed was: %s | Workers Baseline Speed: %s",
-					worker.ID,
-					utils.FormatSpeedString(worker.Speed, "B/s"),
-					utils.FormatSpeedString(rdi.WorkerBaselineSpeed, "B/s"))
-			}
+			rdi.Logger.Restarts.Printf("[INFO] [Worker %02d] RESTART | speed=%s | baseline=%s",
+				worker.ID,
+				utils.FormatSpeedString(worker.Speed, "B/s"),
+				utils.FormatSpeedString(rdi.WorkerBaselineSpeed, "B/s"),
+			)
 			worker.Status = WorkerStatusIdle
 		default:
 		}
@@ -281,14 +291,12 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 		if err != nil {
 			onError(err)
 		}
-
-		rdi.Logger.Writes.Printf("[Worker %2d::Chunk %4d] WROTE CHUNK | Start: %d | End: %d",
-			worker.ID,
-			chunkTask.Index,
-			chunkTask.Start,
-			chunkTask.End-1,
-		)
 	}
+}
+
+func formatBytes(n int64) string {
+	v, p := utils.ScaleValue(float64(n))
+	return fmt.Sprintf("%.2f%siB", v, p)
 }
 
 // <== Helper Functions ==>

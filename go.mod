@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/charmbracelet/bubbles v0.21.1
 	github.com/charmbracelet/bubbletea v1.3.10
+	github.com/spf13/pflag v1.0.10
 )
 
 require (
