@@ -34,7 +34,7 @@ func (rdi *RangeDownloadInfo) rebalanceMirrors(mirrorWorkerMap map[*MirrorInfo][
 			continue
 		}
 
-		if mi.Speed >= 0.5*fastest.Speed {
+		if mi.Speed >= 0.75*fastest.Speed {
 			continue
 		}
 

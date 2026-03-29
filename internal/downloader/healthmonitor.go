@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+type RestartReason struct {
+	Speed    float64
+	Baseline float64
+}
+
 const MonitorInterval = 1 * time.Second
 
 func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
@@ -28,7 +33,7 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 				wi.UpdateSpeed()
 				MirrorWorkerMap[wi.Mirror] = append(MirrorWorkerMap[wi.Mirror], wi)
 				wi.Mirror.Speed += wi.Speed
-				if wi.Status != WorkerStatusDone {
+				if wi.Status == WorkerStatusDownloading || wi.Status == WorkerStatusRequesting || wi.Status == WorkerStatusRetrying {
 					workerSpeeds = append(workerSpeeds, wi.Speed)
 				}
 			}
@@ -65,14 +70,25 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 			// find and restart workers that are slower and have not been recently restarted
 			if rdi.BytesWritten.Load() <= int64(0.98*float64(rdi.TotalSize)) {
 				for _, wi := range rdi.Workers.Slice {
-					if wi.Status != WorkerStatusDone && wi.Speed < (0.3*rdi.WorkerBaselineSpeed) && (time.Since(wi.RestartedAt) > 5*time.Second) {
-						signalRestart(wi.RestartWorkerChan)
+					if wi.Status != WorkerStatusDone &&
+						wi.Status != WorkerStatusIdle &&
+						wi.Speed < (0.3*rdi.WorkerBaselineSpeed) &&
+						time.Since(wi.RestartedAt) > 5*time.Second &&
+						time.Since(wi.LastChunkDoneAt) > 3*time.Second {
+
+						reason := RestartReason{
+							Speed:    wi.Speed,
+							Baseline: rdi.WorkerBaselineSpeed,
+						}
+						signalRestart(wi.RestartWorkerChan, reason)
 						wi.RestartedAt = time.Now()
 					}
 				}
 			}
 
-			rdi.rebalanceMirrors(MirrorWorkerMap)
+			if len(rdi.Mirrors) > 1 {
+				rdi.rebalanceMirrors(MirrorWorkerMap)
+			}
 		case <-ctx.Done():
 			return nil
 		}
@@ -80,9 +96,9 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 }
 
 // function to perform non-blocking send
-func signalRestart(ch chan struct{}) {
+func signalRestart(ch chan RestartReason, reason RestartReason) {
 	select {
-	case ch <- struct{}{}:
+	case ch <- reason:
 	default:
 	}
 }
