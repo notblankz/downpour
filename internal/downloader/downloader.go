@@ -97,7 +97,7 @@ type RangeDownloadInfo struct {
 
 func InitRangeDownloadInfo(filename string, totalSize int64, statusFlags StatusFlags, mirrors []*MirrorInfo) (*RangeDownloadInfo, error) {
 
-	workerLimit := int(min(math.Sqrt(float64(totalSize)/1024), maxWorkerLimit))
+	workerLimit := int(min(math.Sqrt(float64(totalSize)/(1024*1024)), maxWorkerLimit))
 
 	// chunkSize := max(minChunkSize, totalSize/int64(workerLimit))
 	chunkSize := int64(maxChunkSize)
@@ -109,12 +109,13 @@ func InitRangeDownloadInfo(filename string, totalSize int64, statusFlags StatusF
 
 	var dirName string
 	if statusFlags.EnableTrace || statusFlags.EnableTelemetry {
-		dirName = filename[:(strings.LastIndex(filename, "."))]
+		ext := filepath.Ext(filename)
+		dirName = strings.TrimSuffix(filename, ext)
 		err := os.MkdirAll(dirName, os.ModePerm)
 		if err != nil {
 			return nil, err
 		}
-		filename = filepath.Join(dirName, filename)
+		filename = filepath.Join(dirName, filepath.Base(filename))
 	}
 
 	// pre-allocate file with TotalSize
@@ -146,6 +147,7 @@ func InitRangeDownloadInfo(filename string, totalSize int64, statusFlags StatusF
 			Mirror:            mirrors[mirrorIdx],
 		}
 		workerSlice[i] = worker
+		worker.Mirror.ActiveWorkers.Add(1)
 		mirrorIdx++
 	}
 	workers := Workers{

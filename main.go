@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,13 +21,14 @@ var version = "dev"
 
 func main() {
 	var helpFlag, httpLogFlag, telemetryFlag, versionFlag bool
-	var expectedHash, algorithm, mirrorURLs string
+	var expectedHash, algorithm, mirrorURLs, outputFlag string
 
 	flag.BoolVarP(&telemetryFlag, "telemetry", "t", false, "Generate download telemetry CSV")
 	flag.BoolVarP(&httpLogFlag, "httplog", "l", false, "Generate HTTP trace logfile")
 	flag.StringVarP(&mirrorURLs, "mirrors", "m", "", "Mirror URLs (comma-separated)")
 	flag.StringVarP(&expectedHash, "checksum", "c", "", "Expected checksum hash")
 	flag.StringVarP(&algorithm, "algorithm", "a", "", "Cryptographic algorithm")
+	flag.StringVarP(&outputFlag, "output", "o", "", "Custom save location (directory or full file path)")
 	flag.BoolVarP(&versionFlag, "version", "v", false, "Print version")
 	flag.BoolVarP(&helpFlag, "help", "h", false, "Show help message")
 
@@ -85,6 +87,22 @@ func main() {
 		panic(err)
 	}
 	filename := downloader.GetFileName(parsedUrl, resp)
+	if outputFlag != "" {
+		info, err := os.Stat(outputFlag)
+		if err == nil && info.IsDir() {
+			filename = filepath.Join(outputFlag, filename)
+		} else if err == nil {
+			filename = outputFlag
+		} else {
+			parentDir := filepath.Dir(outputFlag)
+			parentInfo, parentErr := os.Stat(parentDir)
+			if parentErr != nil || !parentInfo.IsDir() {
+				startErrorUI(fmt.Errorf("output path is invalid: parent directory %q does not exist", parentDir))
+				return
+			}
+			filename = outputFlag
+		}
+	}
 
 	statusFlags := downloader.StatusFlags{
 		EnableTrace:     httpLogFlag,

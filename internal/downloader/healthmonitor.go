@@ -38,6 +38,15 @@ func (rdi *RangeDownloadInfo) StartHealthMonitor(ctx context.Context) error {
 				}
 			}
 
+			for _, mi := range rdi.Mirrors {
+				active := mi.ActiveWorkers.Load()
+				if active > 0 {
+					mi.Speed = mi.Speed / float64(active)
+				} else {
+					mi.Speed = 0
+				}
+			}
+
 			if len(workerSpeeds) == 0 {
 				continue
 			}
