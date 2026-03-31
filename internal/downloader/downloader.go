@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"downpour/internal/utils"
+	"errors"
 	"fmt"
 	"math"
 	"mime"
@@ -278,17 +279,17 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 
 		// if no signal from health monitor continue with downloading the chunk
 		// ask for a chunk task from the scheduler
-		chunkTask, ok := rdi.pickTaskForWorker()
+		chunkTask, ok := rdi.pickTaskForWorker(worker)
 		if !ok {
 			worker.KillWorker()
 			return
 		}
-		if chunkTask == nil {
-			continue
-		}
 
 		err := worker.downloadChunk(chunkTask, rdi)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				continue
+			}
 			onError(err)
 		}
 	}

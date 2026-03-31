@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"context"
 	"io"
 	"os"
 	"sync/atomic"
@@ -25,19 +26,47 @@ type chunkWriter struct {
 	curTask *ChunkTask
 	file    *os.File
 
+	requestStart int64
+	requestEnd   int64
+	localWritten int64
+
 	globalBytesWritten *atomic.Int64
 }
 
-func (cw *chunkWriter) Write(p []byte) (int, error) {
-	fileOffest := cw.curTask.Start + cw.curTask.CommittedBytes.Load()
-	nwrite, err := cw.file.WriteAt(p, fileOffest)
+func (cw *chunkWriter) Write(toWrite []byte) (int, error) {
+	if cw.curTask == nil {
+		return 0, nil
+	}
+
+	// check for context cancellation before proceeding
+	select {
+	case <-cw.curTask.Ctx.Done():
+		return 0, cw.curTask.Ctx.Err()
+	default:
+	}
+
+	fileOffset := cw.requestStart + cw.localWritten
+	remaining := cw.requestEnd - fileOffset
+	if remaining <= 0 {
+		return 0, context.Canceled
+	}
+
+	if int64(len(toWrite)) > remaining {
+		toWrite = toWrite[:remaining]
+	}
+
+	nwrite, err := cw.file.WriteAt(toWrite, fileOffset)
 	if err != nil {
 		return nwrite, err
 	}
+	cw.localWritten += int64(nwrite)
 
 	cw.worker.TotalBytesWritten += int64(nwrite)
-	cw.curTask.CommittedBytes.Add(int64(nwrite))
-	cw.globalBytesWritten.Add(int64(nwrite))
+	newCommittedBytes := (fileOffset + int64(nwrite)) - cw.curTask.Start
+	delta, _ := cw.curTask.advanceCommitedBytes(newCommittedBytes)
+	if delta > 0 {
+		cw.globalBytesWritten.Add(delta)
+	}
 
 	return nwrite, nil
 }
