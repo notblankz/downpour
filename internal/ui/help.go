@@ -12,6 +12,7 @@ Options:
   -h,  --help         Show this help message
   -t,  --telemetry    Generate a CSV file with download telemetry data
   -l,  --httplog      Generate an HTTP trace logfile
+  -o,  --output       Save file to a custom location (directory or full path)
   -m,  --mirrors      Mirror URLs (comma-separated)
   -c,  --checksum     Verify the downloaded file against this expected hash
   -a,  --algorithm    Specify the cryptographic algorithm for validation (e.g., sha256, md5)

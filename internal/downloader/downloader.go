@@ -26,7 +26,7 @@ type VerifyFunc func()
 const bufferSize = 64 * 1024          // 64KB
 const minChunkSize = 256 * 1024       // 256KB
 const maxChunkSize = 16 * 1024 * 1024 // 16MB
-const workerLimit = 32
+const maxWorkerLimit = 32
 
 func StreamDownload(u url.URL, onProgress ProgressFunc, onDone DoneFunc, onError ErrorFunc) {
 	req, err := http.NewRequest("GET", u.String(), nil)
@@ -97,6 +97,10 @@ type RangeDownloadInfo struct {
 }
 
 func InitRangeDownloadInfo(filename string, totalSize int64, statusFlags StatusFlags, mirrors []*MirrorInfo) (*RangeDownloadInfo, error) {
+
+	workerLimit := int(min(math.Sqrt(float64(totalSize)/(1024*1024)), maxWorkerLimit))
+
+	// chunkSize := max(minChunkSize, totalSize/int64(workerLimit))
 	chunkSize := int64(maxChunkSize)
 	if totalSize < minChunkSize {
 		chunkSize = totalSize
@@ -106,12 +110,13 @@ func InitRangeDownloadInfo(filename string, totalSize int64, statusFlags StatusF
 
 	var dirName string
 	if statusFlags.EnableTrace || statusFlags.EnableTelemetry {
-		dirName = filename[:(strings.LastIndex(filename, "."))]
+		ext := filepath.Ext(filename)
+		dirName = strings.TrimSuffix(filename, ext)
 		err := os.MkdirAll(dirName, os.ModePerm)
 		if err != nil {
 			return nil, err
 		}
-		filename = filepath.Join(dirName, filename)
+		filename = filepath.Join(dirName, filepath.Base(filename))
 	}
 
 	// pre-allocate file with TotalSize
@@ -139,10 +144,11 @@ func InitRangeDownloadInfo(filename string, totalSize int64, statusFlags StatusF
 			ID:                i,
 			Status:            WorkerStatusIdle,
 			HttpClient:        newWorkerClient(),
-			RestartWorkerChan: make(chan struct{}, 1),
+			RestartWorkerChan: make(chan RestartReason, 1),
 			Mirror:            mirrors[mirrorIdx],
 		}
 		workerSlice[i] = worker
+		worker.Mirror.ActiveWorkers.Add(1)
 		mirrorIdx++
 	}
 	workers := Workers{
@@ -265,15 +271,19 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 
 		// check for a restart signal from health monitor
 		select {
-		case <-worker.RestartWorkerChan:
-			worker.Status = WorkerStatusRestarting
-			worker.HttpClient = newWorkerClient()
-			rdi.Logger.Restarts.Printf("[INFO] [Worker %02d] RESTART | speed=%s | baseline=%s",
-				worker.ID,
-				utils.FormatSpeedString(worker.Speed, "B/s"),
-				utils.FormatSpeedString(rdi.WorkerBaselineSpeed, "B/s"),
-			)
-			worker.Status = WorkerStatusIdle
+		case reason := <-worker.RestartWorkerChan:
+			// A small check to see whether the worker has recovered speed
+			if worker.Speed < (0.3 * reason.Baseline) {
+				worker.Status = WorkerStatusRestarting
+				worker.HttpClient = newWorkerClient()
+				rdi.Logger.Restarts.Printf("[INFO] [Worker %02d] RESTART | speed=%s | baseline=%s",
+					worker.ID,
+					utils.FormatSpeedString(reason.Speed, "B/s"),
+					utils.FormatSpeedString(reason.Baseline, "B/s"),
+				)
+				worker.RestartedAt = time.Now()
+				worker.Status = WorkerStatusIdle
+			}
 		default:
 		}
 

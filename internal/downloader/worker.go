@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
-	"net/url"
 	"time"
 )
 
@@ -35,10 +34,11 @@ type WorkerInfo struct {
 	TotalBytesWritten int64
 	LastBytes         int64
 	LastSample        time.Time
+	LastChunkDoneAt   time.Time
 	Status            WorkerStatus
 	StartedAt         time.Time
 	RestartedAt       time.Time
-	RestartWorkerChan chan struct{}
+	RestartWorkerChan chan RestartReason
 	Mirror            *MirrorInfo
 	HttpClient        *http.Client
 }
@@ -54,7 +54,7 @@ func (info *WorkerInfo) UpdateSpeed() float64 {
 	deltaTime := time.Since(info.LastSample).Seconds()
 	info.LastSample = time.Now()
 	curSpeed := float64(deltaBytes) / deltaTime
-	info.Speed = (0.7 * info.Speed) + (0.3 * curSpeed)
+	info.Speed = (0.6 * info.Speed) + (0.4 * curSpeed)
 	return curSpeed
 }
 
@@ -93,10 +93,12 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 				GotConn: func(connInfo httptrace.GotConnInfo) {
 					if !connInfo.Reused {
 						addr := ""
+						addr = connInfo.Conn.RemoteAddr().String()
 						if connInfo.Conn != nil {
-							addr = connInfo.Conn.RemoteAddr().String()
 						}
 						rdi.Logger.HttpTrace.Printf("[INFO] [Worker %02d::Chunk %04d] NEW CONN | addr=%s", workerInfo.ID, currentTask.Index, addr)
+					} else {
+						rdi.Logger.HttpTrace.Printf("[INFO] [Worker %02d::Chunk %04d] CONN REUSED", workerInfo.ID, currentTask.Index)
 					}
 				},
 				WroteRequest: func(info httptrace.WroteRequestInfo) {
@@ -177,29 +179,19 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	rdi.Logger.Writes.Printf("[INFO] [Worker %02d::Chunk %04d] CHUNK DONE | mirror=%s | bytes=%d | duration=%s",
 		workerInfo.ID,
 		currentTask.Index,
-		mirrorHostname(workerInfo.Mirror.URL),
+		mirrorHost(workerInfo.Mirror.URL),
 		currentTask.CommittedBytes.Load(),
 		utils.FormatDuration(time.Since(startTime)),
 	)
 
-	return nil
-}
+	workerInfo.LastChunkDoneAt = time.Now()
 
-func mirrorHostname(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	host := parsed.Hostname()
-	if host == "" {
-		return rawURL
-	}
-	return host
+	return nil
 }
 
 func newWorkerClient() *http.Client {
 	tr := http.Transport{
-		MaxIdleConnsPerHost: workerLimit,
+		MaxIdleConnsPerHost: maxWorkerLimit,
 		MaxConnsPerHost:     0,
 		DisableKeepAlives:   false,
 		IdleConnTimeout:     10 * time.Second,
