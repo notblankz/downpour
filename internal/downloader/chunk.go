@@ -2,13 +2,19 @@ package downloader
 
 import (
 	"context"
+	"sort"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type ChunkTask struct {
 	Index int64
 	Start int64
 	End   int64 // End Exclusive
+
+	// time stored as Int64 (unix nano seconds) since time.Time{} is not thread safe
+	StartTimeNsec atomic.Int64
 
 	Done atomic.Bool
 	// ActiveHedgers tracks workers currently racing this chunk via hedge assignment.
@@ -18,6 +24,15 @@ type ChunkTask struct {
 	Cancel context.CancelFunc
 
 	CommittedBytes atomic.Int64 // total bytes committed (perfectly written) to the file
+
+	WorkerContributions sync.Map    // map of WorkerID[WorkerContributionEntry]
+	LoggedOnce          atomic.Bool // this is to make sure only one log line is printed globally
+}
+
+type WorkerContributionEntry struct {
+	WorkerID       int
+	CommittedBytes int64
+	IsHedging      bool
 }
 
 const maxHedgersPerChunk = 3
@@ -124,4 +139,76 @@ func (ct *ChunkTask) advanceCommitedBytes(newFrontier int64) (delta int64, done 
 			return delta, false
 		}
 	}
+}
+
+func (ct *ChunkTask) addWorkerContribution(worker *WorkerInfo, delta int64) {
+	if ct == nil || delta <= 0 {
+		return
+	}
+
+	// update the map if worker entry available
+	if v, ok := ct.WorkerContributions.Load(worker.ID); ok {
+		wc := v.(*WorkerContributionEntry)
+		wc.CommittedBytes += delta
+		if worker.IsHedging {
+			wc.IsHedging = true
+		}
+		return
+	}
+
+	// create a new key value entry if lookup fails
+	ct.WorkerContributions.Store(worker.ID, &WorkerContributionEntry{
+		WorkerID:       worker.ID,
+		CommittedBytes: delta,
+		IsHedging:      worker.IsHedging,
+	})
+}
+
+func (ct *ChunkTask) getWorkerContributions() []WorkerContributionEntry {
+	if ct == nil {
+		return nil
+	}
+
+	output := make([]WorkerContributionEntry, 0, 4)
+
+	ct.WorkerContributions.Range(func(key, value any) bool {
+		wc, ok := value.(*WorkerContributionEntry)
+		if !ok || wc == nil {
+			return true
+		}
+
+		if wc.CommittedBytes <= 0 {
+			return true
+		}
+
+		output = append(output, *wc)
+		return true
+	})
+
+	sort.Slice(output, func(i, j int) bool {
+		return output[i].WorkerID < output[j].WorkerID
+	})
+
+	return output
+}
+
+func (ct *ChunkTask) trySetStartTime(now time.Time) bool {
+	if ct == nil {
+		return false
+	}
+
+	return ct.StartTimeNsec.CompareAndSwap(0, now.UnixNano())
+}
+
+func (ct *ChunkTask) getStartTime() (time.Time, bool) {
+	if ct == nil {
+		return time.Time{}, false
+	}
+
+	nsec := ct.StartTimeNsec.Load()
+	if nsec == 0 {
+		return time.Time{}, false
+	}
+
+	return time.Unix(0, nsec), true
 }

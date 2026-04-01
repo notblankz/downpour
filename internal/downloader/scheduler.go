@@ -22,14 +22,6 @@ func (rdi *RangeDownloadInfo) pickTaskForWorker(worker *WorkerInfo) (task *Chunk
 		for _, ct := range rdi.Chunks {
 			if ct.isHedgeable() && ct.tryAcquireHedgeSlot() {
 				worker.IsHedging = true
-				rdi.Logger.Writes.Printf("[INFO] [Worker %02d::Chunk %04d] CHUNK GIVEN FOR HEDGE | mirror=%s | bytes=%d | hedgers=%d | worker status=%s",
-					worker.ID,
-					ct.Index,
-					mirrorHost(worker.Mirror.URL),
-					ct.CommittedBytes.Load(),
-					ct.ActiveHedgers.Load(),
-					worker.Status,
-				)
 				return ct, true
 			}
 		}

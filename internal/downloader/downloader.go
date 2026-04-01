@@ -205,7 +205,7 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 	}
 	rdi.Logger = logger
 	rdi.Logger.Writes.Printf("[INFO] [Download] START | size=%s | chunks=%d | workers=%d | mirrors=%d",
-		formatBytes(rdi.TotalSize),
+		utils.FormatBytes(rdi.TotalSize),
 		rdi.TotalChunks,
 		rdi.Workers.Limit,
 		len(rdi.Mirrors),
@@ -303,11 +303,6 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 			onError(err)
 		}
 	}
-}
-
-func formatBytes(n int64) string {
-	v, p := utils.ScaleValue(float64(n))
-	return fmt.Sprintf("%.2f%siB", v, p)
 }
 
 // <== Helper Functions ==>

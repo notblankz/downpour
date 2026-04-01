@@ -2,29 +2,23 @@ package downloader
 
 import (
 	"context"
+	"downpour/internal/utils"
+	"fmt"
 	"io"
+	"log"
 	"os"
+	"strings"
 	"sync/atomic"
+	"time"
 )
 
-// To be implemented after implementation of multi mirror downloading
-// type writeJob struct {
-// 	buf    *[]byte
-// 	offset int64
-// 	n      int64
-// }
-
-// func writerWorker(jobQueue chan writeJob, f *os.File, pool *sync.Pool, bytesWrittern *atomic.Int64, onError ErrorFunc) {
-
-// }
-
 // struct to implement io.Writer for custom use of WriteAt() instead of Write() in io.Copy()
-
 type chunkWriter struct {
-	buf     []byte
-	worker  *WorkerInfo
-	curTask *ChunkTask
-	file    *os.File
+	buf         []byte
+	worker      *WorkerInfo
+	curTask     *ChunkTask
+	chunkLogger *log.Logger
+	file        *os.File
 
 	requestStart int64
 	requestEnd   int64
@@ -63,9 +57,34 @@ func (cw *chunkWriter) Write(toWrite []byte) (int, error) {
 
 	cw.worker.TotalBytesWritten += int64(nwrite)
 	newCommittedBytes := (fileOffset + int64(nwrite)) - cw.curTask.Start
-	delta, _ := cw.curTask.advanceCommitedBytes(newCommittedBytes)
+	delta, done := cw.curTask.advanceCommitedBytes(newCommittedBytes)
 	if delta > 0 {
+		cw.curTask.addWorkerContribution(cw.worker, delta)
 		cw.globalBytesWritten.Add(delta)
+	}
+
+	if done && cw.chunkLogger != nil && cw.curTask.LoggedOnce.CompareAndSwap(false, true) {
+		entries := cw.curTask.getWorkerContributions()
+		logMsg := strings.Builder{}
+
+		var durationStr string
+		if startedAt, ok := cw.curTask.getStartTime(); ok {
+			durationStr = utils.FormatDuration(time.Since(startedAt))
+		} else {
+			durationStr = "unknown"
+		}
+
+		fmt.Fprintf(&logMsg, "[CHUNK %04d] CHUNK DONE (in %s)", cw.curTask.Index, durationStr)
+
+		for _, entry := range entries {
+			role := "Normal"
+			if entry.IsHedging {
+				role = "Hedge"
+			}
+			fmt.Fprintf(&logMsg, ", [Worker %02d (%s) : %s]", entry.WorkerID, role, utils.FormatBytes(entry.CommittedBytes))
+		}
+
+		cw.chunkLogger.Printf("[SUCCESS] %s", logMsg.String())
 	}
 
 	return nwrite, nil
