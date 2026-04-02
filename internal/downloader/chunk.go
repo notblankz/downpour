@@ -185,7 +185,11 @@ func (ct *ChunkTask) getWorkerContributions() []WorkerContributionEntry {
 		return true
 	})
 
+	// Sorts all normal workers in the start and according to worker IDs (ascending)
 	sort.Slice(output, func(i, j int) bool {
+		if output[i].IsHedging != output[j].IsHedging {
+			return !output[i].IsHedging
+		}
 		return output[i].WorkerID < output[j].WorkerID
 	})
 

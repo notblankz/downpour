@@ -67,21 +67,45 @@ func (cw *chunkWriter) Write(toWrite []byte) (int, error) {
 		entries := cw.curTask.getWorkerContributions()
 		logMsg := strings.Builder{}
 
-		var durationStr string
+		var durationSeconds int64
 		if startedAt, ok := cw.curTask.getStartTime(); ok {
-			durationStr = utils.FormatDuration(time.Since(startedAt))
+			durationSeconds = int64(time.Since(startedAt).Round(time.Second) / time.Second)
 		} else {
-			durationStr = "unknown"
+			durationSeconds = -1
 		}
 
-		fmt.Fprintf(&logMsg, "[CHUNK %04d] CHUNK DONE (in %s)", cw.curTask.Index, durationStr)
+		if durationSeconds >= 0 {
+			fmt.Fprintf(&logMsg, "[CHUNK %04d] CHUNK DONE | duration=%03ds | workers=%d | ", cw.curTask.Index, durationSeconds, len(entries))
+		} else {
+			fmt.Fprintf(&logMsg, "[CHUNK %04d] CHUNK DONE | duration=unknown | workers=%d | ", cw.curTask.Index, len(entries))
+		}
+
+		normalContrib := make([]string, 0, len(entries))
+		hedgeContrib := make([]string, 0, len(entries))
 
 		for _, entry := range entries {
-			role := "Normal"
+			contrib := fmt.Sprintf("W%02d:%s", entry.WorkerID, utils.FormatBytes(entry.CommittedBytes))
 			if entry.IsHedging {
-				role = "Hedge"
+				hedgeContrib = append(hedgeContrib, contrib)
+				continue
 			}
-			fmt.Fprintf(&logMsg, ", [Worker %02d (%s) : %s]", entry.WorkerID, role, utils.FormatBytes(entry.CommittedBytes))
+			normalContrib = append(normalContrib, contrib)
+		}
+
+		normalContribStr := strings.Builder{}
+		if len(normalContrib) > 0 {
+			fmt.Fprintf(&normalContribStr, "[%s]", strings.Join(normalContrib, ", "))
+		}
+
+		hedgeContribStr := strings.Builder{}
+		if len(hedgeContrib) > 0 {
+			fmt.Fprintf(&hedgeContribStr, "[%s]", strings.Join(hedgeContrib, ", "))
+		}
+
+		if hedgeContribStr.String() == "" {
+			fmt.Fprintf(&logMsg, "normal=%s", normalContribStr.String())
+		} else {
+			fmt.Fprintf(&logMsg, "normal=%s | hedge=%s", normalContribStr.String(), hedgeContribStr.String())
 		}
 
 		cw.chunkLogger.Printf("[SUCCESS] %s", logMsg.String())
