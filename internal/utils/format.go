@@ -25,6 +25,11 @@ func ScaleValue(b float64) (float64, string) {
 	return scaledValue, string(prefixes[exp-1])
 }
 
+func FormatBytes(n int64) string {
+	v, p := ScaleValue(float64(n))
+	return fmt.Sprintf("%.2f%siB", v, p)
+}
+
 func FormatSpeedString(toScaleValue float64, prefixString string) string {
 	scaledValue, scaledPrefix := ScaleValue(toScaleValue)
 	return fmt.Sprintf("%.2f%s%s", scaledValue, scaledPrefix, prefixString)

@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"downpour/internal/utils"
+	"errors"
 	"fmt"
 	"math"
 	"mime"
@@ -204,7 +205,7 @@ func (rdi *RangeDownloadInfo) RangeDownload(onDone DoneFunc, onVerify VerifyFunc
 	}
 	rdi.Logger = logger
 	rdi.Logger.Writes.Printf("[INFO] [Download] START | size=%s | chunks=%d | workers=%d | mirrors=%d",
-		formatBytes(rdi.TotalSize),
+		utils.FormatBytes(rdi.TotalSize),
 		rdi.TotalChunks,
 		rdi.Workers.Limit,
 		len(rdi.Mirrors),
@@ -288,25 +289,20 @@ func (rdi *RangeDownloadInfo) rangeDownloadWorker(worker *WorkerInfo, onError Er
 
 		// if no signal from health monitor continue with downloading the chunk
 		// ask for a chunk task from the scheduler
-		chunkTask, ok := rdi.pickTaskForWorker()
+		chunkTask, ok := rdi.pickTaskForWorker(worker)
 		if !ok {
 			worker.KillWorker()
 			return
 		}
-		if chunkTask == nil {
-			continue
-		}
 
 		err := worker.downloadChunk(chunkTask, rdi)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				continue
+			}
 			onError(err)
 		}
 	}
-}
-
-func formatBytes(n int64) string {
-	v, p := utils.ScaleValue(float64(n))
-	return fmt.Sprintf("%.2f%siB", v, p)
 }
 
 // <== Helper Functions ==>

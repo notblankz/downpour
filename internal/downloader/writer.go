@@ -1,43 +1,115 @@
 package downloader
 
 import (
+	"context"
+	"downpour/internal/utils"
+	"fmt"
 	"io"
+	"log"
 	"os"
+	"strings"
 	"sync/atomic"
+	"time"
 )
 
-// To be implemented after implementation of multi mirror downloading
-// type writeJob struct {
-// 	buf    *[]byte
-// 	offset int64
-// 	n      int64
-// }
-
-// func writerWorker(jobQueue chan writeJob, f *os.File, pool *sync.Pool, bytesWrittern *atomic.Int64, onError ErrorFunc) {
-
-// }
-
 // struct to implement io.Writer for custom use of WriteAt() instead of Write() in io.Copy()
-
 type chunkWriter struct {
-	buf     []byte
-	worker  *WorkerInfo
-	curTask *ChunkTask
-	file    *os.File
+	buf         []byte
+	worker      *WorkerInfo
+	curTask     *ChunkTask
+	chunkLogger *log.Logger
+	file        *os.File
+
+	requestStart int64
+	requestEnd   int64
+	localWritten int64
 
 	globalBytesWritten *atomic.Int64
 }
 
-func (cw *chunkWriter) Write(p []byte) (int, error) {
-	fileOffest := cw.curTask.Start + cw.curTask.CommittedBytes.Load()
-	nwrite, err := cw.file.WriteAt(p, fileOffest)
+func (cw *chunkWriter) Write(toWrite []byte) (int, error) {
+	if cw.curTask == nil {
+		return 0, nil
+	}
+
+	// check for context cancellation before proceeding
+	select {
+	case <-cw.curTask.Ctx.Done():
+		return 0, cw.curTask.Ctx.Err()
+	default:
+	}
+
+	fileOffset := cw.requestStart + cw.localWritten
+	remaining := cw.requestEnd - fileOffset
+	if remaining <= 0 {
+		return 0, context.Canceled
+	}
+
+	if int64(len(toWrite)) > remaining {
+		toWrite = toWrite[:remaining]
+	}
+
+	nwrite, err := cw.file.WriteAt(toWrite, fileOffset)
 	if err != nil {
 		return nwrite, err
 	}
+	cw.localWritten += int64(nwrite)
 
 	cw.worker.TotalBytesWritten += int64(nwrite)
-	cw.curTask.CommittedBytes.Add(int64(nwrite))
-	cw.globalBytesWritten.Add(int64(nwrite))
+	newCommittedBytes := (fileOffset + int64(nwrite)) - cw.curTask.Start
+	delta, done := cw.curTask.advanceCommitedBytes(newCommittedBytes)
+	if delta > 0 {
+		cw.curTask.addWorkerContribution(cw.worker, delta)
+		cw.globalBytesWritten.Add(delta)
+	}
+
+	if done && cw.chunkLogger != nil && cw.curTask.LoggedOnce.CompareAndSwap(false, true) {
+		entries := cw.curTask.getWorkerContributions()
+		logMsg := strings.Builder{}
+
+		var durationSeconds int64
+		if startedAt, ok := cw.curTask.getStartTime(); ok {
+			durationSeconds = int64(time.Since(startedAt).Round(time.Second) / time.Second)
+		} else {
+			durationSeconds = -1
+		}
+
+		if durationSeconds >= 0 {
+			fmt.Fprintf(&logMsg, "[CHUNK %04d] CHUNK DONE | duration=%03ds | workers=%d | ", cw.curTask.Index, durationSeconds, len(entries))
+		} else {
+			fmt.Fprintf(&logMsg, "[CHUNK %04d] CHUNK DONE | duration=unknown | workers=%d | ", cw.curTask.Index, len(entries))
+		}
+
+		normalContrib := make([]string, 0, len(entries))
+		hedgeContrib := make([]string, 0, len(entries))
+
+		for _, entry := range entries {
+			contrib := fmt.Sprintf("W%02d:%s", entry.WorkerID, utils.FormatBytes(entry.CommittedBytes))
+			if entry.IsHedging {
+				hedgeContrib = append(hedgeContrib, contrib)
+				continue
+			}
+			normalContrib = append(normalContrib, contrib)
+		}
+
+		normalContribStr := strings.Builder{}
+		if len(normalContrib) > 0 {
+			fmt.Fprintf(&normalContribStr, "[%s]", strings.Join(normalContrib, ", "))
+		}
+
+		hedgeContribStr := strings.Builder{}
+		if len(hedgeContrib) > 0 {
+			fmt.Fprintf(&hedgeContribStr, "[%s]", strings.Join(hedgeContrib, ", "))
+		}
+
+		if hedgeContribStr.String() == "" {
+			fmt.Fprintf(&logMsg, "normal=%s", normalContribStr.String())
+		} else {
+			fmt.Fprintf(&logMsg, "normal=%s | hedge=%s", normalContribStr.String(), hedgeContribStr.String())
+		}
+
+		cw.chunkLogger.Printf("[SUCCESS] %s", logMsg.String())
+	}
 
 	return nwrite, nil
 }

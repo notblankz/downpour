@@ -3,7 +3,6 @@ package downloader
 import (
 	"context"
 	"crypto/tls"
-	"downpour/internal/utils"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +28,7 @@ type WorkerInfo struct {
 	KillWorker context.CancelFunc
 	// Chunk             *ChunkInfo
 	CurTask           *ChunkTask
+	IsHedging         bool
 	Speed             float64
 	TotalBytesWritten int64
 	LastBytes         int64
@@ -58,12 +58,16 @@ func (info *WorkerInfo) UpdateSpeed() float64 {
 }
 
 func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDownloadInfo) error {
-	startTime := time.Now()
+	currentTask.trySetStartTime(time.Now())
 	workerInfo.Status = WorkerStatusIdle
 
 	// Bind this worker to the current task
 	workerInfo.CurTask = currentTask
 	unbindTaskFromWorker := func() {
+		if workerInfo.IsHedging && currentTask != nil {
+			currentTask.releaseHedgeSlot()
+			workerInfo.IsHedging = false
+		}
 		workerInfo.CurTask = nil
 	}
 	defer unbindTaskFromWorker()
@@ -73,13 +77,15 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	var doErr error
 	var success bool
 
+	committedBytesSnapshot := currentTask.CommittedBytes.Load()
+
 	for range maxRetries {
 		workerInfo.Status = WorkerStatusRequesting
 		req, err := http.NewRequestWithContext(currentTask.Ctx, "GET", workerInfo.Mirror.URL, nil)
 		if err != nil {
 			return err
 		}
-		req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", currentTask.Start, currentTask.End-1))
+		req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", currentTask.Start+committedBytesSnapshot, currentTask.End-1))
 
 		if rdi.StatusFlags.EnableTrace {
 			trace := &httptrace.ClientTrace{
@@ -115,6 +121,11 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 			resp.Body.Close()
 		}
 
+		// preempt the in-flight request if failed due context.Cancelled
+		if errors.Is(doErr, context.Canceled) {
+			return context.Canceled
+		}
+
 		workerInfo.Status = WorkerStatusRetrying
 
 		// TODO: implement exponential backoff
@@ -122,6 +133,9 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	}
 
 	if !success {
+		if errors.Is(doErr, context.Canceled) {
+			return context.Canceled
+		}
 		host := mirrorHost(workerInfo.Mirror.URL)
 		rdi.Logger.Writes.Printf("[ERROR] [Worker %02d::Chunk %04d] CHUNK FAILED | mirror=%s | err=%v",
 			workerInfo.ID,
@@ -129,9 +143,6 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 			host,
 			doErr,
 		)
-		if errors.Is(doErr, context.Canceled) {
-			return nil
-		}
 		workerInfo.Mirror.Failures.Add(1)
 		if workerInfo.Mirror.Failures.Load() >= 3 {
 			if workerInfo.Mirror.Dead.CompareAndSwap(false, true) {
@@ -147,26 +158,24 @@ func (workerInfo *WorkerInfo) downloadChunk(currentTask *ChunkTask, rdi *RangeDo
 	cw := rdi.WriterPool.Get().(*chunkWriter)
 	cw.worker = workerInfo
 	cw.curTask = currentTask
+	cw.chunkLogger = rdi.Logger.Writes
+	cw.requestStart = currentTask.Start + committedBytesSnapshot
+	cw.requestEnd = currentTask.End
+	cw.localWritten = 0
 
+	if currentTask.CommittedBytes.Load() >= currentTask.End-currentTask.Start {
+		resp.Body.Close()
+		return context.Canceled
+	}
 	_, copyErr := io.CopyBuffer(cw, resp.Body, cw.buf)
 	resp.Body.Close()
 	rdi.WriterPool.Put(cw)
 
 	if copyErr != nil {
-		if errors.Is(copyErr, context.Canceled) {
-			return nil
-		}
 		return copyErr
 	}
 
 	workerInfo.Status = WorkerStatusIdle
-	rdi.Logger.Writes.Printf("[INFO] [Worker %02d::Chunk %04d] CHUNK DONE | mirror=%s | bytes=%d | duration=%s",
-		workerInfo.ID,
-		currentTask.Index,
-		mirrorHost(workerInfo.Mirror.URL),
-		currentTask.CommittedBytes.Load(),
-		utils.FormatDuration(time.Since(startTime)),
-	)
 
 	workerInfo.LastChunkDoneAt = time.Now()
 
