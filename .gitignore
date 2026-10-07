@@ -1,0 +1,10 @@
+# Binaries
+*.exe
+/downpour
+/builds/
+
+# Claude Code workspace
+.claude/
+
+# Download test output
+*.bin
