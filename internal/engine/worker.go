@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,30 +23,6 @@ type Worker struct {
 	progress *atomic.Int64
 	queue    <-chan PieceInfo // receive-only: a worker can't send or close it
 	logger   *slog.Logger
-}
-
-// newClient returns a new http.Client which is then attached to a worker
-func newClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: 1,
-			DisableKeepAlives:   false,
-			IdleConnTimeout:     10 * time.Second,
-			ForceAttemptHTTP2:   false,
-			TLSNextProto:        map[string]func(authority string, c *tls.Conn) http.RoundTripper{},
-			ReadBufferSize:      64 << 10,
-			WriteBufferSize:     64 << 10,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			if len(via) > 0 {
-				req.Header.Set("Range", via[0].Header.Get("Range"))
-			}
-			return nil
-		},
-	}
 }
 
 // Run drains the queue until it's closed, downloading each piece
