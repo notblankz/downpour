@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +17,8 @@ func main() {
 		output    string
 		workers   int
 		chunkSize string
+		verbose   bool
+		logPath   string
 	)
 	root := &cobra.Command{
 		Use:   "downpour <url>",
@@ -25,8 +29,15 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("invalid chunk size: %w", err)
 			}
+
+			logger, closeLog, err := newLogger(verbose, logPath)
+			if err != nil {
+				return err
+			}
+			defer closeLog()
+
 			cfg := engine.NewConfig(args[0], output, workers, cs)
-			return engine.NewDownloader(cfg).Run(cmd.Context())
+			return engine.NewDownloader(cfg, logger).Run(cmd.Context())
 		},
 	}
 
@@ -34,6 +45,8 @@ func main() {
 	f.StringVarP(&output, "output", "o", "download.bin", "output file path")
 	f.IntVarP(&workers, "workers", "w", 16, "number of concurrent workers (1-32)")
 	f.StringVarP(&chunkSize, "chunk-size", "c", "4MB", "chunk size each worker downloads")
+	f.BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
+	f.StringVar(&logPath, "log", "", "write logs to a file instead of stderr")
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -61,4 +74,24 @@ func parseSize(s string) (int64, error) {
 	}
 
 	return n * mult, nil
+}
+
+func newLogger(verbose bool, logPath string) (*slog.Logger, func(), error) {
+	level := slog.LevelInfo
+	if verbose {
+		level = slog.LevelDebug
+	}
+
+	dest := io.Writer(os.Stderr)
+	closeLog := func() {}
+
+	if logPath != "" {
+		fh, err := os.Create(logPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open log file: %w", err)
+		}
+		dest, closeLog = fh, func() { fh.Close() }
+	}
+
+	return slog.New(slog.NewTextHandler(dest, &slog.HandlerOptions{Level: level})), closeLog, nil
 }

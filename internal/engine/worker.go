@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ type Worker struct {
 	file     *os.File
 	progress *atomic.Int64
 	queue    <-chan PieceInfo // receive-only: a worker can't send or close it
+	logger   *slog.Logger
 }
 
 // newClient returns a new http.Client which is then attached to a worker
@@ -51,33 +53,30 @@ func newClient() *http.Client {
 // Run drains the queue until it's closed, downloading each piece
 func (w *Worker) Run(ctx context.Context) error {
 	for p := range w.queue {
-		if err := w.Download(ctx, p); err != nil {
+		if err := w.DownloadPiece(ctx, p); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// Download fetches one piece, retrying failures with backoff
+// DownloadPiece fetches one piece, retrying failures with backoff
 // until it succeeds or the retry budget is expired
-func (w *Worker) Download(ctx context.Context, p PieceInfo) error {
+func (w *Worker) DownloadPiece(ctx context.Context, p PieceInfo) error {
 	const maxRetries = 5
 	for att := 0; ; att++ {
-		retry, wait, err := w.attempt(ctx, p)
+		retry, wait, err := w.attemptPiece(ctx, p)
 		if err == nil {
 			return nil
 		}
 		if !retry || att >= maxRetries-1 {
-			fmt.Printf("%s [W%2d] piece %3d GAVE UP after %d attempts: %v\n",
-				time.Now().Format("15:04:05.000"), w.ID, p.Index, att+1, err)
 			return fmt.Errorf("piece %d: %w", p.Index, err)
 		}
 		if wait == 0 {
 			wait = expBackoff(att)
 		}
 
-		fmt.Printf("%s [W%2d] piece %3d retry att=%d, backing off %v\n",
-			time.Now().Format("15:04:05.000"), w.ID, p.Index, att, wait)
+		w.logger.Warn("retrying piece", "piece", p.Index, "attempt", att, "backoff", wait)
 
 		if err := sleep(ctx, wait); err != nil {
 			return err
@@ -85,8 +84,8 @@ func (w *Worker) Download(ctx context.Context, p PieceInfo) error {
 	}
 }
 
-// attempt performs a single ranged request for the piece
-func (w *Worker) attempt(ctx context.Context, p PieceInfo) (retry bool, wait time.Duration, err error) {
+// attemptPiece performs a single ranged request for the piece
+func (w *Worker) attemptPiece(ctx context.Context, p PieceInfo) (retry bool, wait time.Duration, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, w.url, nil)
 	if err != nil {
 		return false, 0, err
@@ -99,8 +98,7 @@ func (w *Worker) attempt(ctx context.Context, p PieceInfo) (retry bool, wait tim
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("%s [W%2d] piece %3d → %d (retry-after=%q)\n",
-		time.Now().Format("15:04:05.000"), w.ID, p.Index, resp.StatusCode, resp.Header.Get("Retry-After"))
+	w.logger.Debug("response", "piece", p.Index, "status", resp.StatusCode)
 
 	if resp.StatusCode != http.StatusPartialContent {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 16<<10))
@@ -125,6 +123,7 @@ func (w *Worker) attempt(ctx context.Context, p PieceInfo) (retry bool, wait tim
 		return true, 0, fmt.Errorf("short read: got %d want %d", copied, want)
 	}
 
+	w.logger.Debug("piece done", "piece", p.Index, "bytes", copied)
 	return false, 0, nil
 }
 

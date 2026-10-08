@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -16,27 +18,35 @@ import (
 // Downloader coordinates a single ranged, concurrent download
 type Downloader struct {
 	cfg      Config
+	logger   *slog.Logger
 	file     *os.File
 	progress atomic.Int64
 	workers  []*Worker
 }
 
 // NewDownloader returns a Downloader configured by cfg
-func NewDownloader(cfg Config) *Downloader {
+func NewDownloader(cfg Config, logger *slog.Logger) *Downloader {
 	return &Downloader{
-		cfg: cfg,
+		cfg:    cfg,
+		logger: logger,
 	}
 }
 
 // Run performs the whole download i.e. probe the URL, split into pieces,
 // spawn the worker pool and wait for completion or the first fatal error
 func (d *Downloader) Run(ctx context.Context) error {
+	start := time.Now()
+
+	d.logger.Debug("probing", "url", d.cfg.URL)
+	ps := time.Now()
 	size, ranged, err := d.probe(ctx)
 	if err != nil {
 		return fmt.Errorf("probe: %w", err)
 	}
+	d.logger.Debug("probe complete", "size", size, "ranged", ranged, "took", time.Since(ps).Round(time.Millisecond))
 
 	if !ranged {
+		d.logger.Info("ranged requests unsupported, streaming", "url", d.cfg.URL)
 		return d.stream(ctx)
 	}
 
@@ -58,6 +68,11 @@ func (d *Downloader) Run(ctx context.Context) error {
 	}
 	close(queue)
 
+	d.logger.Info("download started",
+		"url", d.cfg.URL, "size", size, "pieces", len(pieces),
+		"workers", d.cfg.Workers, "chunk_size", d.cfg.ChunkSize,
+	)
+
 	d.workers = make([]*Worker, d.cfg.Workers)
 	for i := range d.workers {
 		d.workers[i] = &Worker{
@@ -67,6 +82,7 @@ func (d *Downloader) Run(ctx context.Context) error {
 			file:     d.file,
 			progress: &d.progress,
 			queue:    queue,
+			logger:   d.logger.With("worker", i),
 		}
 	}
 
@@ -74,7 +90,15 @@ func (d *Downloader) Run(ctx context.Context) error {
 	for _, w := range d.workers {
 		g.Go(func() error { return w.Run(gctx) })
 	}
-	return g.Wait()
+
+	if err := g.Wait(); err != nil {
+		d.logger.Error("download failed", "url", d.cfg.URL, "err", err)
+		return err
+	}
+
+	d.logger.Info("download complete", "bytes", d.progress.Load(), "duration", time.Since(start).Round(time.Millisecond))
+
+	return nil
 }
 
 // probe sends a bytes=0-0 request to the server to find out the total file size
@@ -86,7 +110,7 @@ func (d *Downloader) probe(ctx context.Context) (size int64, ranged bool, err er
 	}
 	req.Header.Set("Range", "bytes=0-0")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newClient().Do(req)
 	if err != nil {
 		return 0, false, err
 	}
