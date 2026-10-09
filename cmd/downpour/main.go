@@ -37,7 +37,7 @@ func main() {
 			defer closeLog()
 
 			cfg := engine.NewConfig(args[0], output, workers, cs)
-			return engine.NewDownloader(cfg, logger).Run(cmd.Context())
+			return engine.NewSupervisor(cfg, logger).Run(cmd.Context())
 		},
 	}
 
