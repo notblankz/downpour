@@ -44,10 +44,12 @@ type Supervisor struct {
 
 // NewSupervisor returns a new Supervisor
 func NewSupervisor(cfg Config, logger *slog.Logger) *Supervisor {
-	return &Supervisor{
+	s := &Supervisor{
 		cfg:    cfg,
 		logger: logger,
 	}
+	s.publish()
+	return s
 }
 
 // Snapshot returns the most recently published progress Snapshot struct

@@ -9,35 +9,51 @@ import (
 	"strings"
 
 	"github.com/notblankz/downpour/internal/engine"
+	"github.com/notblankz/downpour/internal/tui"
 	"github.com/spf13/cobra"
 )
 
 func main() {
 	var (
-		output    string
-		workers   int
-		chunkSize string
-		verbose   bool
-		logPath   string
+		output     string
+		workers    int
+		chunkSize  string
+		logEnabled bool
 	)
 	root := &cobra.Command{
 		Use:   "downpour <url>",
 		Short: "A fast concurrent file downloader",
 		Args:  cobra.ExactArgs(1),
+		// RunE: func(cmd *cobra.Command, args []string) error {
+		// 	cs, err := parseSize(chunkSize)
+		// 	if err != nil {
+		// 		return fmt.Errorf("invalid chunk size: %w", err)
+		// 	}
+
+		// 	logger, closeLog, err := newLogger(verbose, logPath)
+		// 	if err != nil {
+		// 		return err
+		// 	}
+		// 	defer closeLog()
+
+		// 	cfg := engine.NewConfig(args[0], output, workers, cs)
+		// 	return engine.NewSupervisor(cfg, logger).Run(cmd.Context())
+		// },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cs, err := parseSize(chunkSize)
 			if err != nil {
-				return fmt.Errorf("invalid chunk size: %w", err)
+				return err
 			}
 
-			logger, closeLog, err := newLogger(verbose, logPath)
+			logger, closeLog, logFile, err := newLogger(logEnabled)
 			if err != nil {
 				return err
 			}
 			defer closeLog()
 
 			cfg := engine.NewConfig(args[0], output, workers, cs)
-			return engine.NewSupervisor(cfg, logger).Run(cmd.Context())
+			sup := engine.NewSupervisor(cfg, logger)
+			return tui.Run(cmd.Context(), sup, cfg, logFile)
 		},
 	}
 
@@ -45,8 +61,7 @@ func main() {
 	f.StringVarP(&output, "output", "o", "download.bin", "output file path")
 	f.IntVarP(&workers, "workers", "w", 16, "number of concurrent workers (1-32)")
 	f.StringVarP(&chunkSize, "chunk-size", "c", "4MB", "chunk size each worker downloads")
-	f.BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
-	f.StringVar(&logPath, "log", "", "write logs to a file instead of stderr")
+	f.BoolVarP(&logEnabled, "log", "l", false, "write a debug log to downpour.log")
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -76,22 +91,19 @@ func parseSize(s string) (int64, error) {
 	return n * mult, nil
 }
 
-func newLogger(verbose bool, logPath string) (*slog.Logger, func(), error) {
-	level := slog.LevelInfo
-	if verbose {
-		level = slog.LevelDebug
+func newLogger(logEnabled bool) (*slog.Logger, func(), string, error) {
+	if !logEnabled {
+		return slog.New(slog.NewTextHandler(io.Discard, nil)), func() {}, "", nil
 	}
 
-	dest := io.Writer(os.Stderr)
-	closeLog := func() {}
+	const path = "downpour.log"
 
-	if logPath != "" {
-		fh, err := os.Create(logPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("open log file: %w", err)
-		}
-		dest, closeLog = fh, func() { fh.Close() }
+	fh, err := os.Create(path)
+	if err != nil {
+		return nil, func() {}, "", fmt.Errorf("open log file: %w", err)
 	}
-
-	return slog.New(slog.NewTextHandler(dest, &slog.HandlerOptions{Level: level})), closeLog, nil
+	logger := slog.New(slog.NewTextHandler(fh, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	return logger, func() { fh.Close() }, path, nil
 }
