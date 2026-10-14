@@ -143,18 +143,7 @@ func (s *Supervisor) observe(ctx context.Context) {
 		case <-ctx.Done():
 			s.publish()
 			return
-		case now := <-t.C:
-			downloaded := s.progress.Load()
-			if dt := now.Sub(s.lastAt).Seconds(); dt > 0 {
-				instant := float64(downloaded-s.lastDownloaded) / dt
-				if s.speed == 0 {
-					s.speed = instant
-				} else {
-					s.speed = 0.3*instant + 0.7*s.speed
-				}
-			}
-			s.lastDownloaded = downloaded
-			s.lastAt = now
+		case <-t.C:
 			s.publish()
 		}
 	}
@@ -163,16 +152,38 @@ func (s *Supervisor) observe(ctx context.Context) {
 // publish computes ETA from the current speed and stores a fresh Snapshot
 func (s *Supervisor) publish() {
 	downloaded := s.progress.Load()
-	var eta time.Duration
-	if s.speed > 0 && s.total > downloaded {
-		eta = time.Duration(float64(s.total-downloaded) / s.speed * float64(time.Second))
-	}
+	s.updateSpeed(downloaded)
 	s.snap.Store(&Snapshot{
 		Downloaded: downloaded,
 		Total:      s.total,
 		Speed:      s.speed,
-		ETA:        eta,
+		ETA:        s.getEta(downloaded),
 	})
+}
+
+// updateSpeed advances the EWMA throughput sampler from the last sample
+func (s *Supervisor) updateSpeed(downloaded int64) {
+	now := time.Now()
+	dt := now.Sub(s.lastAt).Seconds()
+	if dt <= 0 {
+		return
+	}
+	instant := float64(downloaded-s.lastDownloaded) / dt
+	if s.speed == 0 {
+		s.speed = instant
+	} else {
+		s.speed = 0.3*instant + 0.7*s.speed
+	}
+	s.lastDownloaded = downloaded
+	s.lastAt = now
+}
+
+// eta estimates remaining time from the current smoothed speed
+func (s *Supervisor) getEta(downloaded int64) time.Duration {
+	if s.speed <= 0 || s.total <= downloaded {
+		return 0
+	}
+	return time.Duration(float64(s.total-downloaded) / s.speed * float64(time.Second))
 }
 
 // probe sends a bytes=0-0 request to the server to find out the total file size
