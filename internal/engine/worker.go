@@ -16,13 +16,13 @@ import (
 
 // Worker download pieces off the shared queue using its own HTTP client
 type Worker struct {
-	ID       int
-	Client   *http.Client
-	url      string
-	file     *os.File
-	progress *atomic.Int64
-	queue    <-chan PieceInfo // receive-only: a worker can't send or close it
-	logger   *slog.Logger
+	ID         int
+	Client     *http.Client
+	url        string
+	file       *os.File
+	downloaded atomic.Int64
+	queue      <-chan PieceInfo // receive-only: a worker can't send or close it
+	logger     *slog.Logger
 }
 
 // Run drains the queue until it's closed, downloading each piece
@@ -85,7 +85,7 @@ func (w *Worker) attemptPiece(ctx context.Context, p PieceInfo) (retry bool, wai
 		return false, 0, err
 	}
 
-	pw := NewPieceWriter(w.file, p.Start, w.progress)
+	pw := NewPieceWriter(w.file, p.Start, &w.downloaded)
 	bp := GetBuffer()
 	defer PutBuffer(bp)
 

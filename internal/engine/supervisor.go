@@ -26,15 +26,22 @@ type Snapshot struct {
 	ETA        time.Duration
 }
 
+// workerStat is the supervisor's derived view of one worker sampled each tick
+type workerStat struct {
+	lastDownloaded int64
+	lastChangeAt   time.Time
+	speed          float64
+}
+
 // Supervisor orchestrates a single ranged, concurrent download: it probes the
 // URL, plans the pieces, owns the worker pool and observes their progress
 type Supervisor struct {
-	cfg      Config
-	logger   *slog.Logger
-	file     *os.File
-	progress atomic.Int64
-	workers  []*Worker
-	total    int64
+	cfg         Config
+	logger      *slog.Logger
+	file        *os.File
+	workerStats []workerStat
+	workers     []*Worker
+	total       int64
 
 	snap           atomic.Pointer[Snapshot]
 	lastDownloaded int64
@@ -100,16 +107,18 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	)
 
 	s.workers = make([]*Worker, s.cfg.Workers)
+	s.workerStats = make([]workerStat, s.cfg.Workers)
+	now := time.Now()
 	for i := range s.workers {
 		s.workers[i] = &Worker{
-			ID:       i,
-			Client:   newClient(),
-			url:      s.cfg.URL,
-			file:     s.file,
-			progress: &s.progress,
-			queue:    queue,
-			logger:   s.logger.With("worker", i),
+			ID:     i,
+			Client: newClient(),
+			url:    s.cfg.URL,
+			file:   s.file,
+			queue:  queue,
+			logger: s.logger.With("worker", i),
 		}
+		s.workerStats[i].lastChangeAt = now
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -124,7 +133,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		return err
 	}
 
-	s.logger.Info("download complete", "bytes", s.progress.Load(), "duration", time.Since(start).Round(time.Millisecond))
+	s.logger.Info("download complete", "bytes", s.total, "duration", time.Since(start).Round(time.Millisecond))
 
 	return nil
 }
@@ -134,9 +143,6 @@ func (s *Supervisor) Run(ctx context.Context) error {
 func (s *Supervisor) observe(ctx context.Context) {
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
-
-	s.lastAt = time.Now()
-	s.lastDownloaded = s.progress.Load()
 
 	for {
 		select {
@@ -151,8 +157,11 @@ func (s *Supervisor) observe(ctx context.Context) {
 
 // publish computes ETA from the current speed and stores a fresh Snapshot
 func (s *Supervisor) publish() {
-	downloaded := s.progress.Load()
-	s.updateSpeed(downloaded)
+	now := time.Now()
+	dt := now.Sub(s.lastAt).Seconds()
+	downloaded := s.samepleWorkers(now, dt)
+	s.updateSpeed(downloaded, dt)
+	s.lastAt = now
 	s.snap.Store(&Snapshot{
 		Downloaded: downloaded,
 		Total:      s.total,
@@ -161,21 +170,40 @@ func (s *Supervisor) publish() {
 	})
 }
 
+// ewma folds an instantaneous sample into a running average
+func ewma(prev, instant float64) float64 {
+	if prev == 0 {
+		return instant
+	}
+	return 0.3*instant + 0.7*prev
+}
+
+// sampleWorkers reads each worker's counter, advances its per-worker speed, stamps
+// lastChangeAt on progress, and returns the aggregated total bytes downloaded
+func (s *Supervisor) samepleWorkers(now time.Time, dt float64) int64 {
+	var total int64
+	for i := range s.workers {
+		cur := s.workers[i].downloaded.Load()
+		total += cur
+		workerStat := &s.workerStats[i]
+		if dt > 0 {
+			workerStat.speed = ewma(workerStat.speed, float64(cur-workerStat.lastDownloaded)/dt)
+		}
+		if cur != workerStat.lastDownloaded {
+			workerStat.lastChangeAt = now
+		}
+		workerStat.lastDownloaded = cur
+	}
+	return total
+}
+
 // updateSpeed advances the EWMA throughput sampler from the last sample
-func (s *Supervisor) updateSpeed(downloaded int64) {
-	now := time.Now()
-	dt := now.Sub(s.lastAt).Seconds()
+func (s *Supervisor) updateSpeed(downloaded int64, dt float64) {
 	if dt <= 0 {
 		return
 	}
-	instant := float64(downloaded-s.lastDownloaded) / dt
-	if s.speed == 0 {
-		s.speed = instant
-	} else {
-		s.speed = 0.3*instant + 0.7*s.speed
-	}
+	s.speed = ewma(s.speed, float64(downloaded-s.lastDownloaded)/dt)
 	s.lastDownloaded = downloaded
-	s.lastAt = now
 }
 
 // eta estimates remaining time from the current smoothed speed
