@@ -17,6 +17,11 @@ import (
 
 const pollInterval = 500 * time.Millisecond
 
+type WorkerSnapshot struct {
+	ID    int
+	Speed float64
+}
+
 // Snapshot is an immutable read-model of download progress, published by the
 // Supervisor and read by observers via Supervisor.Snapshot
 type Snapshot struct {
@@ -24,6 +29,7 @@ type Snapshot struct {
 	Total      int64
 	Speed      float64
 	ETA        time.Duration
+	Workers    []WorkerSnapshot
 }
 
 // workerStat is the supervisor's derived view of one worker sampled each tick
@@ -159,7 +165,7 @@ func (s *Supervisor) observe(ctx context.Context) {
 func (s *Supervisor) publish() {
 	now := time.Now()
 	dt := now.Sub(s.lastAt).Seconds()
-	downloaded := s.samepleWorkers(now, dt)
+	downloaded, workerSnapshots := s.samepleWorkers(now, dt)
 	s.updateSpeed(downloaded, dt)
 	s.lastAt = now
 	s.snap.Store(&Snapshot{
@@ -167,6 +173,7 @@ func (s *Supervisor) publish() {
 		Total:      s.total,
 		Speed:      s.speed,
 		ETA:        s.getEta(downloaded),
+		Workers:    workerSnapshots,
 	})
 }
 
@@ -180,8 +187,9 @@ func ewma(prev, instant float64) float64 {
 
 // sampleWorkers reads each worker's counter, advances its per-worker speed, stamps
 // lastChangeAt on progress, and returns the aggregated total bytes downloaded
-func (s *Supervisor) samepleWorkers(now time.Time, dt float64) int64 {
+func (s *Supervisor) samepleWorkers(now time.Time, dt float64) (int64, []WorkerSnapshot) {
 	var total int64
+	workerSnapshots := make([]WorkerSnapshot, len(s.workers))
 	for i := range s.workers {
 		cur := s.workers[i].downloaded.Load()
 		total += cur
@@ -193,8 +201,12 @@ func (s *Supervisor) samepleWorkers(now time.Time, dt float64) int64 {
 			workerStat.lastChangeAt = now
 		}
 		workerStat.lastDownloaded = cur
+		workerSnapshots[i] = WorkerSnapshot{
+			ID:    i,
+			Speed: workerStat.speed,
+		}
 	}
-	return total
+	return total, workerSnapshots
 }
 
 // updateSpeed advances the EWMA throughput sampler from the last sample
