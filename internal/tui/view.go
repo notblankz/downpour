@@ -17,6 +17,7 @@ var (
 	stSpeed = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	stOK    = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
 	stErr   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	stWarn  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 )
 
 func (m model) View() string {
@@ -57,7 +58,7 @@ func (m model) progressView() string {
 	line := pct + " " + m.bar.ViewAs(ratio) + " " + meta
 
 	return strings.Join([]string{
-		"", m.header(), info, "", status, line, "", stMuted.Render("q quit"), "",
+		"", m.header(), info, "", status, line, "", m.workers(width), stMuted.Render("q quit"), "",
 	}, "\n")
 }
 
@@ -83,6 +84,62 @@ func (m model) doneView() string {
 		lines = append(lines, stMuted.Render("log    ")+m.logFile)
 	}
 	return strings.Join(append(lines, ""), "\n")
+}
+
+func (m model) workers(width int) string {
+	ws := m.snap.Workers
+	if len(ws) == 0 {
+		return ""
+	}
+
+	var maxSpeed float64
+	for _, w := range ws {
+		if w.Speed > maxSpeed {
+			maxSpeed = w.Speed
+		}
+	}
+
+	const barW = 8
+	cells := make([]string, len(ws))
+	for i, w := range ws {
+		fill := 0
+		st := stSpeed
+		if maxSpeed > 0 {
+			fill = int(math.Round(w.Speed / maxSpeed * barW))
+			if w.Speed < 0.5*maxSpeed {
+				st = stWarn
+			}
+		}
+		bar := st.Render(strings.Repeat("█", fill)) + stMuted.Render(strings.Repeat("░", barW-fill))
+		cells[i] = stMuted.Render(fmt.Sprintf("w%02d", w.ID)) + " " + bar + " " +
+			st.Render(fmt.Sprintf("%4.1f MB/s", w.Speed/(1<<20)))
+	}
+
+	const cellW, gap = 22, 3
+	cols := max(1, (width+gap)/(cellW+gap))
+	if cols > len(cells) {
+		cols = len(cells)
+	}
+
+	var b strings.Builder
+	b.WriteString(stMuted.Render("workers") + "\n")
+	for i, c := range cells {
+		if i > 0 {
+			if i%cols == 0 {
+				b.WriteByte('\n')
+			} else {
+				b.WriteString(strings.Repeat(" ", gap))
+			}
+		}
+		// pad every cell except the last one in its row (no trailing padding)
+		if (i%cols != cols-1) && i != len(cells)-1 {
+			if g := cellW - lipgloss.Width(c); g > 0 {
+				c += strings.Repeat(" ", g)
+			}
+		}
+		b.WriteString(c)
+	}
+	return b.String()
 }
 
 func (m model) errorView() string {
