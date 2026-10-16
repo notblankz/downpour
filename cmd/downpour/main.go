@@ -24,21 +24,6 @@ func main() {
 		Use:   "downpour <url>",
 		Short: "A fast concurrent file downloader",
 		Args:  cobra.ExactArgs(1),
-		// RunE: func(cmd *cobra.Command, args []string) error {
-		// 	cs, err := parseSize(chunkSize)
-		// 	if err != nil {
-		// 		return fmt.Errorf("invalid chunk size: %w", err)
-		// 	}
-
-		// 	logger, closeLog, err := newLogger(verbose, logPath)
-		// 	if err != nil {
-		// 		return err
-		// 	}
-		// 	defer closeLog()
-
-		// 	cfg := engine.NewConfig(args[0], output, workers, cs)
-		// 	return engine.NewSupervisor(cfg, logger).Run(cmd.Context())
-		// },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cs, err := parseSize(chunkSize)
 			if err != nil {
@@ -91,6 +76,8 @@ func parseSize(s string) (int64, error) {
 	return n * mult, nil
 }
 
+// newLogger returns a debug logger writing to downpour.log plus its close func
+// and path, or a no-op io.Discard logger when logging is off
 func newLogger(logEnabled bool) (*slog.Logger, func(), string, error) {
 	if !logEnabled {
 		return slog.New(slog.NewTextHandler(io.Discard, nil)), func() {}, "", nil

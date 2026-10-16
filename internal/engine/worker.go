@@ -20,7 +20,7 @@ type Worker struct {
 	Client     *http.Client
 	url        string
 	file       *os.File
-	downloaded atomic.Int64
+	downloaded atomic.Int64     // bytes this worker has written
 	queue      <-chan PieceInfo // receive-only: a worker can't send or close it
 	logger     *slog.Logger
 }
@@ -102,7 +102,7 @@ func (w *Worker) attemptPiece(ctx context.Context, p PieceInfo) (retry bool, wai
 	return false, 0, nil
 }
 
-// parseRetryAfter reads a Retry-After header (delay in seeconds); returns 0 if absent or invalid
+// parseRetryAfter reads a Retry-After header (delay in seconds); returns 0 if absent or invalid
 func parseRetryAfter(v string) time.Duration {
 	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && secs > 0 {
 		return time.Duration(secs) * time.Second

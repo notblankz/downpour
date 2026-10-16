@@ -26,6 +26,8 @@ type model struct {
 type tickMsg time.Time
 type doneMsg struct{ err error }
 
+// Run drives the download under a Bubbletea program and returns the download's
+// own error (not the TUI's)
 func Run(parent context.Context, sup *engine.Supervisor, cfg engine.Config, logFile string) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()

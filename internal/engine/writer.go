@@ -7,7 +7,8 @@ import (
 )
 
 // PieceWriter adapts file.WriteAt into an io.Writer, writing a piece at an
-// advancing offset and adding each write to the global progress counter
+// advancing offset and adding each write to the per-worker progress counter
+// it was given
 type PieceWriter struct {
 	file     *os.File
 	offset   int64

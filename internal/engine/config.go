@@ -5,6 +5,7 @@ const (
 	maxWorkers   = 32
 )
 
+// Config holds the validated params for one download
 type Config struct {
 	URL       string
 	Output    string

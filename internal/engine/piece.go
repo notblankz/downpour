@@ -1,5 +1,6 @@
 package engine
 
+// PieceInfo is a struct representing a contiguous byte range of the file, [Start, End)
 type PieceInfo struct {
 	Index int64
 	Start int64

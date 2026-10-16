@@ -17,6 +17,7 @@ import (
 
 const pollInterval = 500 * time.Millisecond
 
+// WorkerSnapshot is a per-worker line in the read model
 type WorkerSnapshot struct {
 	ID    int
 	Speed float64
@@ -55,7 +56,8 @@ type Supervisor struct {
 	speed          float64
 }
 
-// NewSupervisor returns a new Supervisor
+// NewSupervisor returns a new Supervisor and seeds an initial zero snapshot
+// so that Snapshot() is never nil
 func NewSupervisor(cfg Config, logger *slog.Logger) *Supervisor {
 	s := &Supervisor{
 		cfg:    cfg,
@@ -144,8 +146,8 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	return nil
 }
 
-// observe polls the shared progress counter on a fixed interval, smooths the
-// speed with an EWMA and publishes a Snapshot each tick until ctx is cancelled
+// observe ticks on the poll interval, calling publish each tick and once more
+// when ctx is cancelled
 func (s *Supervisor) observe(ctx context.Context) {
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
@@ -165,7 +167,7 @@ func (s *Supervisor) observe(ctx context.Context) {
 func (s *Supervisor) publish() {
 	now := time.Now()
 	dt := now.Sub(s.lastAt).Seconds()
-	downloaded, workerSnapshots := s.samepleWorkers(now, dt)
+	downloaded, workerSnapshots := s.sampleWorkers(now, dt)
 	s.updateSpeed(downloaded, dt)
 	s.lastAt = now
 	s.snap.Store(&Snapshot{
@@ -186,8 +188,9 @@ func ewma(prev, instant float64) float64 {
 }
 
 // sampleWorkers reads each worker's counter, advances its per-worker speed, stamps
-// lastChangeAt on progress, and returns the aggregated total bytes downloaded
-func (s *Supervisor) samepleWorkers(now time.Time, dt float64) (int64, []WorkerSnapshot) {
+// lastChangeAt on progress, and returns the aggregated total bytes downloaded plus
+// a fresh per-worker snapshot
+func (s *Supervisor) sampleWorkers(now time.Time, dt float64) (int64, []WorkerSnapshot) {
 	var total int64
 	workerSnapshots := make([]WorkerSnapshot, len(s.workers))
 	for i := range s.workers {
